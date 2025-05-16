@@ -361,3 +361,49 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+
+# Python / Flask / Build
+# ----------------------
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+venv/
+.env/
+env/
+.venv/
+env.bak/
+venv.bak/
+
+# Flask instance folder
+instance/
+
+# Env files
+.env
+*.env
+
+# SQLite / DB files and backups
+*.sqlite3
+*.db
+*.db3
+backups/
+
+# Logs
+logs/
+*.log
+
+# IDE settings (add if you use these editors)
+.vscode/
+.idea/
