@@ -1,0 +1,10 @@
+{
+  "DB_PATH": "auth.db",
+  "HOST": "0.0.0.0",
+  "PORT": 5000,
+  "SMTP_HOST": "smtp.ionos.com",
+  "SMTP_PORT": 587,
+  "SMTP_USER": "admin@vespeyr.com",
+  "SMTP_PASS": "AuthAdmin123$$",
+  "RESET_URL_BASE": "https://api.vespeyr.com/auth/reset-password?token="
+}
