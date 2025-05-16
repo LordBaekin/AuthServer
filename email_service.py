@@ -1,13 +1,55 @@
-import time# email_service.py - Email functions
+﻿# email_service.py - Email functions
+import time  # email_service.py - Email functions
 import re
 import smtplib
 import logging
+import os
 from email.message import EmailMessage
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from config import config
 
-# Email templates
+# Directory for user-customized templates
+TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
+
+def load_templates():
+    """
+    Load all templates, falling back to the built-in EMAIL_TEMPLATES
+    if no override file exists on disk.
+    Returns a dict: template_name → template_content
+    """
+    os.makedirs(TEMPLATE_DIR, exist_ok=True)
+    result = {}
+    for name, default in EMAIL_TEMPLATES.items():
+        path = os.path.join(TEMPLATE_DIR, f"{name}.html")
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    result[name] = f.read()
+            except Exception as e:
+                logging.error(f"Failed to read template override {path}: {e}")
+                result[name] = default
+        else:
+            result[name] = default
+    return result
+
+def save_template(name, content):
+    """
+    Save the given template content to disk so it persists
+    across restarts. Overwrites or creates templates/<name>.html.
+    """
+    os.makedirs(TEMPLATE_DIR, exist_ok=True)
+    path = os.path.join(TEMPLATE_DIR, f"{name}.html")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        logging.info(f"Template '{name}' saved to {path}")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to save template '{name}' to {path}: {e}")
+        return False
+
+# Built-in email templates
 EMAIL_TEMPLATES = {
     'reset_password': '''
 <!DOCTYPE html>
@@ -45,7 +87,6 @@ EMAIL_TEMPLATES = {
 </body>
 </html>
     ''',
-    
     'password_changed': '''
 <!DOCTYPE html>
 <html>
@@ -75,7 +116,6 @@ EMAIL_TEMPLATES = {
 </body>
 </html>
     ''',
-    
     'welcome': '''
 <!DOCTYPE html>
 <html>
@@ -146,16 +186,17 @@ def send_email(to_email, subject, body, is_html=False):
         return False
 
 def send_template_email(to_email, template_name, subject, context=None):
-    """Send an email using a template"""
-    if template_name not in EMAIL_TEMPLATES:
+    """Send an email using a template, allowing for on-disk overrides"""
+    templates = load_templates()
+    
+    if template_name not in templates:
         logging.error(f"Email template '{template_name}' not found")
         return False
         
-    template = EMAIL_TEMPLATES[template_name]
+    body = templates[template_name]
     context = context or {}
     
     # Replace template variables
-    body = template
     for key, value in context.items():
         placeholder = '{{' + key + '}}'
         body = body.replace(placeholder, str(value))

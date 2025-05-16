@@ -11,6 +11,7 @@
     <OutputPath>.</OutputPath>
     <Name>AuthServer</Name>
     <RootNamespace>AuthServer</RootNamespace>
+    <SuppressEnvironmentCreationPrompt>True</SuppressEnvironmentCreationPrompt>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
     <DebugSymbols>true</DebugSymbols>
@@ -23,6 +24,20 @@
   <ItemGroup>
     <Compile Include="api_console.py" />
     <Compile Include="gui.py" />
+    <Compile Include="gui\main.py" />
+    <Compile Include="gui\help_dialog.py" />
+    <Compile Include="gui\admin_setup.py" />
+    <Compile Include="gui\database_tab.py" />
+    <Compile Include="gui\logs_tab.py" />
+    <Compile Include="gui\config_tab.py" />
+    <Compile Include="gui\scheduled_tasks.py" />
+    <Compile Include="gui\server_runner.py" />
+    <Compile Include="gui\status_tab.py" />
+    <Compile Include="gui\templates_tab.py" />
+    <Compile Include="gui\utils.py" />
+    <Compile Include="gui\base.py" />
+    <Compile Include="gui\app_controller.py" />
+    <Compile Include="gui\__init__.py" />
     <Compile Include="README.md" />
     <Compile Include="auth.py" />
     <Compile Include="redis_service.py" />
@@ -32,7 +47,16 @@
     <Compile Include="config.py" />
     <Compile Include="email_service.py" />
     <Compile Include="server.py" />
-    <Compile Include="AuthServer.py" />
+    <Compile Include="tk_update_manager.py" />
+    <Compile Include="tk_theme_manager.py" />
+  </ItemGroup>
+  <ItemGroup>
+    <Folder Include="gui\" />
+    <Folder Include="assets\" />
+  </ItemGroup>
+  <ItemGroup>
+    <Content Include="manifest.json" />
+    <Content Include="scrollbar-fix.patch" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
   <!-- Uncomment the CoreCompile target to enable the Build command in

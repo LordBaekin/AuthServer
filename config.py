@@ -10,7 +10,7 @@ from pathlib import Path
 CONFIG_PATH = 'config.json'
 BACKUP_DIR = 'backups'
 LOG_DIR = 'logs'
-APP_VERSION = '1.0.0'
+APP_VERSION = '1.0.3'
 DATABASE_VERSION = 1
 
 # Default configuration settings
@@ -84,7 +84,11 @@ DEFAULT_CONFIG = {
     
     # Application settings
     "APP_NAME": "Vespeyr Authentication",
-    "COMPANY_NAME": "Vespeyr Games"
+    "COMPANY_NAME": "Vespeyr Games",
+    
+    # Update settings
+    "UPDATE_MANIFEST_URL": "https://dl.dropboxusercontent.com/scl/fi/pb05brur6fwvk18m7pj94/manifest.json?rlkey=d31bc51w1zfbtyajm7tq8p96y&dl=1",
+    "CHECK_UPDATES_ON_STARTUP": True
 }
 
 def load_config():
@@ -132,8 +136,8 @@ def load_config():
     
     # Ensure JWT_SECRET is set
     if not cfg["JWT_SECRET"]:
-        # In interactive terminal, prompt for secret
-        if sys.stdin.isatty() and 'pytest' not in sys.modules:
+        # In interactive terminal, prompt for secret only if stdin exists and is a TTY
+        if getattr(sys, "stdin", None) and sys.stdin.isatty() and 'pytest' not in sys.modules:
             print("\n⚠️  WARNING: No JWT_SECRET configured!")
             print("A secure JWT_SECRET is required for token signing.")
             print("Options: ")
@@ -155,7 +159,7 @@ def load_config():
                 logging.warning("Generating random JWT_SECRET. ALL TOKENS WILL BE INVALIDATED when server restarts!")
                 cfg["JWT_SECRET"] = secrets.token_hex(32)
         else:
-            # In non-interactive mode, generate random secret but warn
+            # In non-interactive or no stdin mode, generate random secret but warn
             logging.warning("No JWT_SECRET configured. Using random secret. ALL TOKENS WILL BE INVALIDATED when server restarts!")
             cfg["JWT_SECRET"] = secrets.token_hex(32)
     
@@ -168,6 +172,8 @@ def load_config():
     save_config(cfg)
     return cfg
 
+
+
 def save_config(cfg):
     """Save config to file, omitting any sensitive values"""
     # Create a copy to avoid modifying the original
@@ -175,7 +181,7 @@ def save_config(cfg):
     
     # Redact sensitive values when saving to file
     # They'll still be in memory and env vars can override
-    sensitive_keys = ["JWT_SECRET", "SMTP_PASS", "DB_PASSWORD"]
+    sensitive_keys = ["JWT_SECRET", "SMTP_PASS", "DB_PASSWORD", "REDIS_PASSWORD"]
     for key in sensitive_keys:
         if key in save_cfg and save_cfg[key]:
             # If value exists in config file, keep it

@@ -1,0 +1,7 @@
+{
+  "version": "1.0.3",
+  "url": "https://example.com/downloads/vespeyr-auth-1.0.1.exe",
+  "release_notes": "## What's New in 1.0.1\n\n- Fixed issue with theme manager integration\n- Improved stability and performance\n- Added automatic update checking on startup\n- Enhanced UI responsiveness",
+  "min_required_version": "1.0.0",
+  "release_date": "2025-05-16"
+}
