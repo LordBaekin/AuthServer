@@ -24,6 +24,10 @@ DEFAULT_CONFIG = {
     "DB_USER": "",  # Used for PostgreSQL/MySQL
     "DB_PASSWORD": "",  # Used for PostgreSQL/MySQL
     "DB_POOL_SIZE": 10,  # Connection pool size
+    "JWT_ALGORITHM": "RS256",  # Default to RS256
+    "JWT_ISSUER": "vespeyr-auth-server",
+    "JWT_AUDIENCE": "coherence-cloud-api",
+    "FORCE_JWT_ALGORITHM": "RS256",         # Can be "RS256", "HS256" or None (auto-detect)
     
     # Server settings
     "HOST": "0.0.0.0",
@@ -49,6 +53,8 @@ DEFAULT_CONFIG = {
 
     # Security settings
     "JWT_SECRET": "",  # Will prompt if empty
+    "JWT_ISSUER": "vespeyr-auth-server",  # Issuer claim for JWT tokens
+    "JWT_AUDIENCE": "coherence-cloud",    # Audience claim for JWT tokens
     "JWT_EXPIRATION": 86400,  # 24 hours
     "REFRESH_TOKEN_EXPIRATION": 2592000,  # 30 days
     "ALLOWED_ORIGINS": "http://localhost:3000,https://vespeyr.com",
@@ -69,7 +75,7 @@ DEFAULT_CONFIG = {
     "DEBUG_MODE": False,
     
     # Logging settings
-    "LOG_LEVEL": "INFO",
+    "LOG_LEVEL": "DEBUG",
     "LOG_FORMAT": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     "LOG_MAX_SIZE": 10485760,  # 10MB
     "LOG_BACKUP_COUNT": 10,

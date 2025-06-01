@@ -1,18 +1,25 @@
-# api.py - Flask routes and API
+﻿# api.py - Flask routes and API
 import logging
 import time
 import bcrypt
 import uuid
+import hashlib
 from datetime import datetime
 import os
 import signal
 import threading
+import json
+import sqlite3
+import traceback
+
 
 from redis_service import get_redis_client
 
 # Flask imports
-from flask import Flask, request, jsonify, g, redirect
+from flask import Flask, request, jsonify, g, redirect, abort 
+from flask_jwt_extended import jwt_required, get_jwt_identity
 from werkzeug.middleware.proxy_fix import ProxyFix
+from auth import get_user_by_id, update_user, get_current_user_id
 
 # Rate limiting
 from flask_limiter import Limiter
@@ -22,12 +29,13 @@ from flask_limiter.util import get_remote_address
 from flask_cors import CORS
 
 # Import our modules
-from config import config, APP_VERSION
+from config import config, APP_VERSION, save_config
 from db import (
     db_execute,
     log_security_event,
     close_db_connections,
-    get_connection_pool_stats
+    get_connection_pool_stats,
+    db_query_one
 )
 from email_service import send_template_email
 from auth import (
@@ -45,6 +53,11 @@ from auth import (
     token_required,
     admin_required
 )
+
+
+
+
+
 
 # ---- Security Middleware ----
 class SecurityMiddleware:
@@ -86,14 +99,22 @@ def create_app(test_config=None):
 
     # CORS
     origins = config["ALLOWED_ORIGINS"].split(',')
-    CORS(app, resources={r"/auth/*": {"origins": origins}})
+    CORS(app, resources={
+    r"/auth/*":       {"origins": origins},
+    r"/inventory/*":  {"origins": origins},
+    r"/quests/*":     {"origins": origins},
+    r"/stats/*":      {"origins": origins},
+    r"/characters/*": {"origins": origins},
+    r"/characters":   {"origins": origins},
+    })
+
 
     # Rate limiter
     if config.get("REDIS_ENABLED", False):
         redis_client = get_redis_client('rate_limit')
         if redis_client:
             try:
-                from flask_limiter.storage import RedisStorage
+                from flask_limiter.storage.redis import RedisStorage
                 limiter = Limiter(
                     key_func=get_remote_address,
                     default_limits=[config["RATE_LIMIT_DEFAULT"]],
@@ -120,6 +141,33 @@ def create_app(test_config=None):
         'access': logging.getLogger('vespeyr.access'),
         'security': logging.getLogger('vespeyr.security')
     }
+
+
+    import io
+
+    def force_utf8_logger_streams(loggers_dict):
+        for logger in loggers_dict.values():
+            for handler in logger.handlers:
+                stream = getattr(handler, 'stream', None)
+                if isinstance(stream, io.TextIOWrapper):
+                    try:
+                        # Re-wrap in UTF-8 to support unicode like '->'
+                        handler.setStream(io.TextIOWrapper(
+                            stream.buffer,
+                            encoding='utf-8',
+                            errors='replace',  # prevents crash on fallback
+                            line_buffering=True
+                        ))
+                    except Exception as e:
+                        print(f"[UTF8 WRAP ERROR] {e}")
+
+    # Only do this if running directly (not gunicorn or production)
+    if threading.current_thread() is threading.main_thread():
+        force_utf8_logger_streams(loggers)
+
+
+
+
 
     # Request logging
     @app.before_request
@@ -179,11 +227,15 @@ def create_app(test_config=None):
     @limiter.limit(config["RATE_LIMIT_DEFAULT"])
     def register():
         try:
+            # 1) Parse & sanitize JSON
             data = sanitize_input(request.json or {})
-            ip, ua = get_client_info()
+
+            # 2) Required fields
             for k in ('username', 'email', 'password'):
-                if k not in data:
+                if k not in data or not isinstance(data[k], str):
                     return jsonify({'error': f'{k} required'}), 400
+
+            # 3) Format & strength validations
             if not is_valid_username(data['username']):
                 return jsonify({'error': 'Invalid username format.'}), 400
             if not is_valid_email(data['email']):
@@ -192,10 +244,12 @@ def create_app(test_config=None):
             if not valid:
                 return jsonify({'error': msg}), 400
 
+            # 4) Hash and prepare to insert
             hashed = bcrypt.hashpw(data['password'].encode(), bcrypt.gensalt())
             user_id = str(uuid.uuid4())
             ts = int(time.time())
 
+            # 5) Attempt the INSERT
             try:
                 db_execute(
                     'INSERT INTO users '
@@ -204,68 +258,102 @@ def create_app(test_config=None):
                     (user_id, data['username'], data['email'], hashed, ts, ts),
                     commit=True
                 )
-            except Exception:
-                existing = db_execute(
-                    'SELECT username, email FROM users WHERE username=? OR email=?',
-                    (data['username'], data['email']),
-                    fetchone=True
-                )
-                if existing and existing['username'] == data['username']:
-                    return jsonify({'error': 'Username already exists'}), 409
-                if existing and existing['email'] == data['email']:
-                    return jsonify({'error': 'Email already exists'}), 409
-                return jsonify({'error': 'Registration failed'}), 500
+            except sqlite3.IntegrityError as e:
+                err = str(e).lower()
+                loggers['app'].warning(f"IntegrityError during registration: {err}")
 
-            loggers['app'].info(f"New user registered: {data['username']} ({user_id})")
-            log_security_event(user_id, 'USER_CREATED',
-                               f"New user account created: {data['username']}", ip)
+                # Duplicate username?
+                if 'unique' in err and ('username' in err or 'users.username' in err):
+                    return jsonify({'error': 'Username already exists. Please choose another.'}), 409
+                # Duplicate email?
+                if 'unique' in err and 'email' in err:
+                    return jsonify({'error': 'Email address already registered.'}), 409
 
-            if config.get("ENABLE_WELCOME_EMAIL", True):
-                send_template_email(
-                    data['email'],
-                    'welcome',
-                    f"Welcome to {config['APP_NAME']}",
-                    {'username': data['username'], 'login_link': config['LOGIN_URL']}
-                )
+                # Something else went wrong at the DB level
+                loggers['app'].error(f"Unexpected IntegrityError: {e}")
+                return jsonify({'error': 'Registration failed due to a database constraint.'}), 500
 
-            token = create_access_token(user_id)
+            # 6) Issue JWTs / sessions
+            token   = create_access_token(user_id)
             refresh = create_refresh_token(user_id)
-            expiry = ts + config["JWT_EXPIRATION"]
+            expiry  = ts + config["JWT_EXPIRATION"]
 
             db_execute(
                 'INSERT INTO user_sessions '
                 '(token, user_id, created_at, expires_at, ip_address, user_agent, last_active) '
                 'VALUES (?, ?, ?, ?, ?, ?, ?)',
-                (token, user_id, ts, expiry, ip, ua, ts),
+                (token, user_id, ts, expiry, *get_client_info(), ts),
                 commit=True
             )
 
+            # 7) Send confirmation email
+            try:
+                from email_service import send_template_email
+
+                email_success = send_template_email(
+                    to_email=data['email'],
+                    template_name="welcome",  # Must match EMAIL_TEMPLATES key
+                    subject="Welcome to Vespeyr",
+                    context={
+                        "username": data['username'],
+                        "email": data['email'],
+                        "login_link": config.get("FRONTEND_LOGIN_URL", "https://vespeyr.com/login")
+                    }
+                )
+
+                if email_success:
+                    loggers['app'].info(f"Welcome email sent to {data['email']}")
+                else:
+                    loggers['app'].warning(f"Email sending reported failure for {data['email']}")
+
+            except Exception as email_err:
+                loggers['app'].warning(f"Email send failed after registration: {email_err}")
+
+            # 8) Return success response
             return jsonify({
-                'id': user_id,
-                'username': data['username'],
-                'access_token': token,
+                'id':            user_id,
+                'username':      data['username'],
+                'access_token':  token,
                 'refresh_token': refresh,
-                'expires_in': config["JWT_EXPIRATION"],
-                'message': 'Registration successful'
+                'expires_in':    config["JWT_EXPIRATION"],
+                'token_type':    'Bearer',
+                'message':       'Registration successful',
+                'email_sent':    email_success if 'email_success' in locals() else False
             }), 201
 
         except Exception as e:
             loggers['app'].error(f"Registration error: {e}")
+            traceback.print_exc()
             return jsonify({'error': 'Server error during registration'}), 500
+
+
+
+        
 
     @app.route('/auth/login', methods=['POST'])
     @limiter.limit(config["RATE_LIMIT_LOGIN"])
     def login():
         try:
-            data = sanitize_input(request.json or {})
+            # Accept JSON or form
+            if request.is_json:
+                data = sanitize_input(request.get_json() or {})
+            else:
+                # Accept both 'username' and 'name' keys for maximum Unity compatibility
+                form = request.form or {}
+                data = {
+                    'username': form.get('username') or form.get('name'),
+                    'password': form.get('password')
+                }
+                data = sanitize_input(data)
+
             ip, ua = get_client_info()
 
             # Required fields
             for k in ('username', 'password'):
-                if k not in data:
+                if not data.get(k):
                     return jsonify({'error': f'{k} required'}), 400
-            if not isinstance(data['username'], str) or not isinstance(data['password'], str):
-                return jsonify({'error': 'Invalid credentials format'}), 400
+                if not isinstance(data[k], str):
+                    return jsonify({'error': 'Invalid credentials format'}), 400
 
             # Account lockout
             locked, left = check_account_status(data['username'])
@@ -336,6 +424,7 @@ def create_app(test_config=None):
                     'access_token': token,
                     'refresh_token': refresh,
                     'expires_in':   config["JWT_EXPIRATION"],
+                    'token_type':   'Bearer',
                     'message':      'Login successful'
                 }), 200
 
@@ -358,7 +447,9 @@ def create_app(test_config=None):
 
         except Exception as e:
             loggers['app'].error(f"Login error: {e}")
+            traceback.print_exc() 
             return jsonify({'error': 'Server error during login'}), 500
+
 
 
     @app.route('/auth/refresh', methods=['POST'])
@@ -372,7 +463,7 @@ def create_app(test_config=None):
             if 'refresh_token' not in data:
                 return jsonify({'error': 'refresh_token required'}), 400
 
-            # Verify it�s a proper refresh token
+            # Verify it's a proper refresh token
             payload = verify_token(data['refresh_token'])
             if not payload or payload.get('type') != 'refresh':
                 return jsonify({'error': 'Invalid refresh token'}), 401
@@ -424,13 +515,40 @@ def create_app(test_config=None):
             return jsonify({
                 'access_token':  new_token,
                 'refresh_token': new_refresh,
-                'expires_in':    config["JWT_EXPIRATION"]
+                'expires_in':    config["JWT_EXPIRATION"],
+                'token_type':    'Bearer'  # Added token_type
             }), 200
 
         except Exception as e:
             loggers['app'].error(f"Token refresh error: {e}")
             return jsonify({'error': 'Server error during token refresh'}), 500
 
+    @app.route('/leave_world', methods=['POST'])
+    @token_required
+    def leave_world():
+        """
+        Clears world_key for the current user's active session.
+        Use this when returning from in-game to the server/world selection screen.
+        """
+        user_id = g.user_id
+        auth_header = request.headers.get('Authorization', '')
+        now = int(time.time())
+
+        if auth_header.startswith('Bearer '):
+            token = auth_header.split(' ', 1)[1]
+            db_execute(
+                'UPDATE user_sessions SET world_key=NULL WHERE user_id=? AND token=?',
+                (user_id, token), commit=True
+            )
+        else:
+            db_execute(
+                'UPDATE user_sessions SET world_key=NULL WHERE user_id=? AND is_valid=1 AND expires_at > ?',
+                (user_id, now), commit=True
+            )
+
+        # Optionally, clear any cached character data in your session storage if needed
+
+        return jsonify({'message': 'World exited. You may select a new server.'}), 200
 
     @app.route('/auth/logout', methods=['POST'])
     @token_required
@@ -439,19 +557,31 @@ def create_app(test_config=None):
             user_id = g.user_id
             ip, _ = get_client_info()
             auth_header = request.headers.get('Authorization', '')
+            now = int(time.time())
+
             if auth_header.startswith('Bearer '):
                 token = auth_header.split(' ', 1)[1]
+
+                # Invalidate this session and clear world_key for it
                 db_execute(
-                    'UPDATE user_sessions SET is_valid=0 WHERE user_id=? AND token=?',
+                    'UPDATE user_sessions SET is_valid=0, world_key=NULL WHERE user_id=? AND token=?',
                     (user_id, token), commit=True
                 )
+            else:
+                # As fallback, clear world_key and invalidate all active sessions for this user
+                db_execute(
+                    'UPDATE user_sessions SET is_valid=0, world_key=NULL WHERE user_id=? AND is_valid=1 AND expires_at > ?',
+                    (user_id, now), commit=True
+                )
+
             log_security_event(user_id, 'USER_LOGOUT',
                                f"User logged out from {ip}", ip)
             return jsonify({'message': 'Successfully logged out'}), 200
 
         except Exception as e:
-            loggers['app'].error(f"Logout error: {e}")
+            logging.getLogger('vespeyr.app').error(f"Logout error: {e}")
             return jsonify({'error': 'Server error during logout'}), 500
+
 
     @app.route('/auth/request-password-reset', methods=['POST'])
     @limiter.limit(config["RATE_LIMIT_RESET"])
@@ -459,47 +589,64 @@ def create_app(test_config=None):
         try:
             data = sanitize_input(request.json or {})
             ip, _ = get_client_info()
-            if 'email' not in data:
+            email = data.get('email')
+
+            if not email:
                 return jsonify({'error': 'email required'}), 400
-            if not is_valid_email(data['email']):
+            if not is_valid_email(email):
                 return jsonify({'error': 'Invalid email format'}), 400
 
-            user = db_execute(
+            # Fetch all users with that email
+            users = db_execute(
                 'SELECT id, username FROM users WHERE email=?',
-                (data['email'],), fetchone=True
+                (email,), fetchall=True
             )
-            if not user:
-                loggers['app'].info(f"Password reset requested for non-existent email: {data['email']}")
+            if not users:
+                loggers['app'].info(f"Password reset requested for non-existent email: {email}")
                 return jsonify({'message': 'If your email is registered, you will receive reset instructions'}), 200
 
-            token = str(uuid.uuid4())
-            expires = int(time.time()) + 3600
-            db_execute('DELETE FROM reset_tokens WHERE user_id=?', (user['id'],), commit=True)
-            db_execute(
-                'INSERT INTO reset_tokens '
-                '(token, user_id, expires_at, created_at, used) '
-                'VALUES (?, ?, ?, ?, ?)',
-                (token, user['id'], expires, int(time.time()), 0),
-                commit=True
+            # Build reset links for each account
+            accounts_html = ""
+            for user in users:
+                token = str(uuid.uuid4())
+                expires = int(time.time()) + 3600
+                db_execute('DELETE FROM reset_tokens WHERE user_id=?', (user['id'],), commit=True)
+                db_execute(
+                    'INSERT INTO reset_tokens '
+                    '(token, user_id, expires_at, created_at, used) '
+                    'VALUES (?, ?, ?, ?, ?)',
+                    (token, user['id'], expires, int(time.time()), 0),
+                    commit=True
+                )
+
+                reset_link = config["RESET_URL_BASE"] + token
+                accounts_html += f"<p><b>{user['username']}</b>: <a href='{reset_link}'>Reset Password</a></p>\n"
+
+                log_security_event(user['id'], 'PASSWORD_RESET_REQUEST',
+                                   f"Password reset requested from {ip}", ip)
+
+            # Send email using new template
+            success = send_template_email(
+                to_email=email,
+                template_name="multi_reset_password",
+                subject=f"Reset your {config['APP_NAME']} password(s)",
+                context={
+                    'email': email,
+                    'accounts_html': accounts_html
+                }
             )
 
-            reset_link = config["RESET_URL_BASE"] + token
-            send_template_email(
-                data['email'],
-                'reset_password',
-                f"Reset your {config['APP_NAME']} password",
-                {'username': user['username'], 'reset_link': reset_link}
-            )
-
-            loggers['app'].info(f"Password reset email sent to: {data['email']} for user: {user['username']}")
-            log_security_event(user['id'], 'PASSWORD_RESET_REQUEST',
-                               f"Password reset requested from {ip}", ip)
+            if success:
+                loggers['app'].info(f"Password reset email sent for {len(users)} user(s) to: {email}")
+            else:
+                loggers['app'].warning(f"Failed to send password reset email for: {email}")
 
             return jsonify({'message': 'If your email is registered, you will receive reset instructions'}), 200
 
         except Exception as e:
             loggers['app'].error(f"Password reset request error: {e}")
             return jsonify({'error': 'Server error processing reset request'}), 500
+
 
     @app.route('/auth/reset-password', methods=['POST'])
     def reset_password():
@@ -744,6 +891,98 @@ def create_app(test_config=None):
             'db_pool': pool_stats
         }), 200
 
+
+    @app.route('/worlds/status', methods=['GET'])
+    def get_worlds_status():
+        """
+        Returns status and player count for all known worlds.
+        """
+        # Query all active sessions and join with worlds table (if you have one)
+        result = db_execute('''
+            SELECT
+                world_key,
+                COUNT(DISTINCT user_id) as online_players
+            FROM
+                user_sessions
+            WHERE
+                is_valid = 1 AND expires_at > ? AND world_key IS NOT NULL
+            GROUP BY world_key
+        ''', (int(time.time()),), fetchall=True)
+
+        # Optional: If you have a static list of known worlds, join here.
+        world_list = []  # You can add static world metadata here if needed
+        for row in result:
+            world_list.append({
+                'world_key': row['world_key'],
+                'status': 'Online' if row['online_players'] > 0 else 'Offline',
+                'player_count': row['online_players']
+            })
+        return jsonify(world_list), 200
+
+
+
+    @app.route('/worlds/<world_key>/status', methods=['GET'])
+    def get_world_status(world_key):
+        """
+        Returns status and player count for a single world.
+        """
+        row = db_execute('''
+            SELECT
+                COUNT(DISTINCT user_id) as online_players
+            FROM
+                user_sessions
+            WHERE
+                is_valid = 1 AND expires_at > ? AND world_key = ?
+        ''', (int(time.time()), world_key), fetchone=True)
+
+        player_count = row['online_players'] if row else 0
+
+        # If you want to set more rules (e.g., maintenance), adjust "status" logic here
+        status = 'Online' if player_count > 0 else 'Offline'
+        return jsonify({
+            'world_key': world_key,
+            'status': status,
+            'player_count': player_count
+        }), 200
+
+
+
+    @app.route('/auth/jwt-info', methods=['GET'])
+    def jwt_info():
+        """Return JWT configuration information for Coherence"""
+        try:
+            # Path to the public key
+            public_key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'public_key.pem')
+            
+            # Load the public key if it exists
+            try:
+                with open(public_key_path, 'r') as key_file:
+                    public_key = key_file.read()
+                
+                # Return RSA256 configuration
+                return jsonify({
+                    'algorithm': 'RS256',
+                    'key': public_key,
+                    'issuer': config.get('APP_NAME', 'Vespeyr Authentication'),
+                    'version': APP_VERSION
+                }), 200
+            except FileNotFoundError:
+                # Fall back to HMAC if RSA isn't configured
+                algorithm = config.get("TOKEN_ALGORITHM", "HS256")
+                
+                # Create a key ID by hashing the secret (don't expose the actual secret)
+                key_id = hashlib.sha256(config["JWT_SECRET"].encode()).hexdigest()[:16]
+                
+                return jsonify({
+                    'algorithm': algorithm,
+                    'kid': key_id,
+                    'issuer': config.get('APP_NAME', 'Vespeyr Authentication'),
+                    'version': APP_VERSION
+                }), 200
+        except Exception as e:
+            logging.error(f"JWT info error: {e}")
+            return jsonify({'error': 'Internal server error'}), 500
+
     # Graceful shutdown handler
     def shutdown_handler(signum, frame):
         logging.info(f"Received signal {signum}, shutting down...")
@@ -757,8 +996,906 @@ def create_app(test_config=None):
         except (ValueError, RuntimeError) as e:
             logging.warning(f"Could not register signal handlers: {e}")
 
-    return app
 
+
+    @app.route('/inventory/<world_key>/<key>/<scene>', methods=['GET'])
+    @token_required
+    def get_inventory(world_key, key, scene):
+        user_id = g.user_id
+
+        # Debug log so we can trace exactly what's being requested
+        app.logger.debug(
+            f"[Inventory] get_inventory() called -> "
+            f"user_id={user_id}, world_key={world_key}, save_key={key}, scene={scene}"
+        )
+
+        # Query database for the user's inventory data, now filtering by world_key
+        inventory_data = db_execute(
+            '''
+            SELECT ui_data, scene_data
+              FROM inventory
+             WHERE user_id   = ?
+               AND world_key = ?
+               AND save_key  = ?
+               AND scene     = ?
+            ''',
+            (user_id, world_key, key, scene),
+            fetchone=True
+        )
+
+        if not inventory_data:
+            app.logger.debug("[Inventory] No row found, returning empty payload")
+            return jsonify({'ui_data': '', 'scene_data': ''}), 200
+
+        app.logger.debug("[Inventory] Row found, returning saved data")
+        return jsonify({
+            'ui_data':    inventory_data['ui_data'],
+            'scene_data': inventory_data['scene_data']
+        }), 200
+
+
+    @app.route('/inventory', methods=['POST'])
+    @token_required
+    def save_inventory():
+        user_id = g.user_id
+        data = sanitize_input(request.json or {})
+
+        # Require world_key too
+        if not all(k in data for k in ('key','scene','ui_data','scene_data','world_key')):
+            return jsonify({'error':'Missing required fields'}), 400
+
+        world_key = data['world_key']
+
+        # Check if already exists
+        existing = db_execute(
+            'SELECT id FROM inventory WHERE user_id=? AND world_key=? AND save_key=? AND scene=?',
+            (user_id, world_key, data['key'], data['scene']),
+            fetchone=True
+        )
+
+
+        timestamp = int(time.time())
+        if existing:
+            db_execute(
+              '''UPDATE inventory
+                 SET ui_data=?, scene_data=?, world_key=?, updated_at=?
+                 WHERE id=?''',
+              (data['ui_data'], data['scene_data'], world_key, timestamp, existing['id']),
+              commit=True
+            )
+        else:
+            db_execute(
+              '''INSERT INTO inventory
+                 (user_id, save_key, scene, ui_data, scene_data, world_key, created_at, updated_at)
+                 VALUES (?,?,?,?,?,?,?,?)''',
+              (user_id, data['key'], data['scene'],
+               data['ui_data'], data['scene_data'], world_key,
+               timestamp, timestamp),
+              commit=True
+            )
+
+        return jsonify({'message':'Inventory saved successfully'}), 200
+
+
+    @app.route('/quests/<world_key>/<key>', methods=['GET'])
+    @token_required
+    def get_quests(world_key, key):
+        user_id = g.user_id
+
+        app.logger.debug(
+            f"[Quests] get_quests() called -> "
+            f"user_id={user_id}, world_key={world_key}, save_key={key}"
+        )
+
+        quest_data = db_execute(
+            '''
+            SELECT active_quests,
+                   completed_quests,
+                   failed_quests
+              FROM quests
+             WHERE user_id   = ?
+               AND world_key = ?
+               AND save_key  = ?
+            ''',
+            (user_id, world_key, key),
+            fetchone=True
+        )
+
+        if not quest_data:
+            app.logger.debug("[Quests] No row found, returning empty payload")
+            return jsonify({
+                'active_quests':    '',
+                'completed_quests': '',
+                'failed_quests':    ''
+            }), 200
+        app.logger.debug("[Quests] Row found, returning saved quest data")
+
+        return jsonify({
+            'active_quests':    quest_data['active_quests'],
+            'completed_quests': quest_data['completed_quests'],
+            'failed_quests':    quest_data['failed_quests']
+        }), 200
+
+
+    @app.route('/quests', methods=['POST'])
+    @token_required
+    def save_quests():
+        user_id = g.user_id
+        data = sanitize_input(request.json or {})
+
+        # Now require world_key in the payload
+        required = ('world_key', 'key', 'active_quests', 'completed_quests', 'failed_quests')
+        if not all(k in data for k in required):
+            return jsonify({'error': 'Missing required fields'}), 400
+
+        world_key = data['world_key']
+        save_key  = data['key']
+
+        app.logger.debug(
+            f"[Quests] save_quests() called -> "
+            f"user_id={user_id}, world_key={world_key}, save_key={save_key}"
+        )
+
+        existing = db_execute(
+            '''
+            SELECT id
+              FROM quests
+             WHERE user_id   = ?
+               AND world_key = ?
+               AND save_key  = ?
+            ''',
+            (user_id, world_key, save_key),
+            fetchone=True
+        )
+
+        timestamp = int(time.time())
+        if existing:
+            db_execute(
+                '''
+                UPDATE quests
+                   SET active_quests    = ?,
+                       completed_quests = ?,
+                       failed_quests    = ?,
+                       updated_at       = ?
+                 WHERE id = ?
+                ''',
+                (
+                    data['active_quests'],
+                    data['completed_quests'],
+                    data['failed_quests'],
+                    timestamp,
+                    existing['id']
+                ),
+                commit=True
+            )
+            app.logger.debug(f"[Quests] Updated existing row id={existing['id']}")
+        else:
+            db_execute(
+                '''
+                INSERT INTO quests
+                    (user_id, world_key, save_key,
+                     active_quests, completed_quests, failed_quests,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    user_id,
+                    world_key,
+                    save_key,
+                    data['active_quests'],
+                    data['completed_quests'],
+                    data['failed_quests'],
+                    timestamp,
+                    timestamp
+                ),
+                commit=True
+            )
+            app.logger.debug("[Quests] Inserted new row")
+
+        return jsonify({'message': 'Quests saved successfully'}), 200
+
+
+    @app.route('/stats/<world_key>/<key>', methods=['GET'])
+    @token_required
+    def get_stats(world_key, key):
+        user_id = g.user_id
+
+        app.logger.debug(
+            f"[Stats] get_stats() called -> "
+            f"user_id={user_id}, world_key={world_key}, save_key={key}"
+        )
+
+        stats_data = db_execute(
+            '''
+            SELECT stats_json
+              FROM stats
+             WHERE user_id   = ?
+               AND world_key = ?
+               AND save_key  = ?
+            ''',
+            (user_id, world_key, key),
+            fetchone=True
+        )
+
+        if not stats_data:
+            app.logger.debug("[Stats] No row found, returning empty stats_json")
+            return jsonify({'stats_json': ''}), 200
+
+        app.logger.debug("[Stats] Row found, returning saved stats_json")
+        return jsonify({'stats_json': stats_data['stats_json']}), 200
+
+    @app.route('/api/user/preferences', methods=['GET'])
+    @jwt_required()
+    def get_preferences():
+        user_id = get_jwt_identity()
+        user = get_user_by_id(user_id)
+        if not user:
+            return jsonify({'msg': 'User not found'}), 404
+        return jsonify({
+            'rememberMe':         bool(user.remember_me),
+            'autoLoginServer':    bool(user.auto_login_server),
+            'autoLoginCharacter': bool(user.auto_login_character),
+            'lastServerId':       user.last_server_id      or '',
+            'lastCharacterName':  user.last_character_name or ''
+        }), 200
+
+
+    @app.route('/api/user/preferences', methods=['PUT'])
+    @jwt_required()
+    def update_preferences():
+        user_id = get_jwt_identity()
+        data = request.get_json(force=True)
+        # validate presence
+        for field in ('rememberMe','autoLoginServer','autoLoginCharacter'):
+            if field not in data:
+                return jsonify({'msg': f'Missing field {field}'}), 400
+        update_user(
+            user_id,
+            remember_me=bool(data['rememberMe']),
+            auto_login_server=bool(data['autoLoginServer']),
+            auto_login_character=bool(data['autoLoginCharacter'])
+        )
+        return jsonify(success=True), 200
+
+
+    @app.route('/api/user/preferences/last', methods=['POST'])
+    @jwt_required()
+    def update_last():
+        user_id = get_jwt_identity()
+        data = request.get_json(force=True)
+        updates = {}
+        if 'lastServerId' in data:
+            updates['last_server_id'] = data['lastServerId'] or None
+        if 'lastCharacterName' in data:
+            updates['last_character_name'] = data['lastCharacterName'] or None
+        if not updates:
+            return jsonify({'msg': 'No fields to update'}), 400
+        update_user(user_id, **updates)
+        return jsonify(success=True), 200
+
+
+    @app.route('/stats', methods=['POST'])
+    @limiter.exempt
+    @token_required
+    def save_stats():
+        user_id = g.user_id
+        data = sanitize_input(request.json or {})
+
+        # Now require world_key as well as key and stats_json
+        if not all(k in data for k in ('world_key', 'key', 'stats_json')):
+            return jsonify({'error': 'Missing required fields'}), 400
+
+        world_key = data['world_key']
+        save_key  = data['key']
+
+        logging.debug(f"[Stats] save_stats() called -> user_id={user_id}, world_key={world_key}, save_key={save_key}")
+
+        # Verify the user still exists
+        user_check = db_execute(
+            'SELECT id FROM users WHERE id = ?',
+            (user_id,),
+            fetchone=True
+        )
+        if not user_check:
+            logging.error(f"[Stats] Invalid user session: user_id={user_id}")
+            return jsonify({'error': 'Invalid user session. Please log in again.'}), 401
+
+        # Look for an existing stats row *including* world_key
+        existing = db_execute(
+            'SELECT id FROM stats WHERE user_id = ? AND world_key = ? AND save_key = ?',
+            (user_id, world_key, save_key),
+            fetchone=True
+        )
+
+        ts = int(time.time())
+        try:
+            if existing:
+                logging.debug(f"[Stats] Updating existing stats id={existing['id']}")
+                db_execute(
+                    'UPDATE stats SET stats_json = ?, updated_at = ? WHERE id = ?',
+                    (data['stats_json'], ts, existing['id']),
+                    commit=True
+                )
+            else:
+                logging.debug("[Stats] Inserting new stats row")
+                db_execute(
+                    '''INSERT INTO stats
+                          (user_id, world_key, save_key, stats_json, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?)''',
+                    (user_id, world_key, save_key, data['stats_json'], ts, ts),
+                    commit=True
+                )
+
+            return jsonify({'message': 'Stats saved successfully'}), 200
+
+        except Exception as e:
+            logging.error(f"[Stats] Failed to save stats: {e}")
+            return jsonify({'error': 'Failed to save stats due to a database error'}), 500
+
+
+    # 1a) List all characters for this user+world
+    @app.route("/characters/<world_key>/<path:account_key>", methods=["GET"])
+    def list_characters(world_key, account_key):
+        user_id = get_current_user_id()                # your auth helper
+        # account_key should match the save_key you used (e.g. Tester)
+        rows = db_execute(
+            "SELECT character_name, character_data FROM characters "
+            " WHERE user_id = ? AND world_key = ?",
+            (user_id, world_key),
+            fetchall=True
+        )
+        # each row.character_data is a JSON blob of the rest of the Character object
+        characters = []
+        for r in rows:
+            data = json.loads(r["character_data"] or "{}")
+            data["CharacterName"] = r["character_name"]
+            characters.append(data)
+        return jsonify(characters), 200
+
+    # 1b) Create or update a single character
+    @app.route("/characters/<world_key>/<path:account_key>", methods=["POST"])
+    def create_or_update_character(world_key, account_key):
+        user_id = get_current_user_id()
+        payload = request.get_json(force=True)
+        if not payload or "CharacterName" not in payload:
+            abort(400, "Must supply JSON with CharacterName field")
+
+        name      = payload["CharacterName"]
+        data_json = json.dumps(payload)
+        now       = int(time.time())
+
+        db_execute(
+            """
+            INSERT INTO characters
+              (user_id, world_key, character_name, character_data, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, world_key, character_name)
+            DO UPDATE SET
+              character_data = excluded.character_data,
+              updated_at    = excluded.updated_at
+            """,
+            (user_id, world_key, name, data_json, now, now),
+            commit=True
+        )
+        return ("", 200)
+
+    # 1c) Delete a character row by path
+    @app.route(
+        "/characters/<world_key>/<path:account_key>/<character_name>",
+        methods=["DELETE"],
+        endpoint="delete_character_by_path"    # <— new, unique endpoint name
+    )
+    @token_required
+    @limiter.limit("30 per minute")
+    def delete_character_by_path(world_key, account_key, character_name):
+        user_id = get_current_user_id()
+        # attempt delete
+        db_execute(
+            "DELETE FROM characters "
+            " WHERE user_id = ? AND world_key = ? AND character_name = ?",
+            (user_id, world_key, character_name),
+            commit=True
+        )
+        return ("", 204)
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # List characters by world (GET)
+    # ──────────────────────────────────────────────────────────────────────────────
+    @app.route('/characters/<world_key>', methods=['GET'])
+    @token_required
+    @limiter.limit("60 per minute")
+    def get_characters_by_world(world_key):
+        """
+        Returns a list of characters for the authenticated user in the specified world.
+        Each entry will include its characterId.
+        """
+        user_id = g.user_id
+        logging.info(f"Loading characters for user={user_id} world={world_key}")
+
+        try:
+            rows = db_execute(
+                'SELECT character_id, character_data '
+                'FROM characters '
+                'WHERE user_id = ? AND world_key = ?',
+                (user_id, world_key),
+                fetchall=True
+            )
+
+            characters = []
+            for r in rows or []:
+                parsed = json.loads(r['character_data'])
+                parsed['CharacterId'] = r['character_id']
+                characters.append(parsed)
+
+            logging.info(f"Found {len(characters)} characters for user={user_id}")
+            return jsonify(characters), 200
+
+        except Exception as e:
+            logging.error(f"Error loading characters for world {world_key}: {e}")
+            return jsonify({'error': 'Failed to load characters'}), 500
+
+
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # List all characters (GET)
+    # ──────────────────────────────────────────────────────────────────────────────
+    @app.route('/characters', methods=['GET'])
+    @token_required
+    @limiter.limit("60 per minute")
+    def get_characters():
+        """
+        Returns a list of all characters for the authenticated user.
+        Optionally filtered by world_key query param.
+        Each entry will include the stored characterId.
+        """
+        user_id   = g.user_id
+        world_key = request.args.get('world_key')
+
+        try:
+            if world_key:
+                rows = db_execute(
+                    'SELECT character_id, character_data '
+                    'FROM characters '
+                    'WHERE user_id = ? AND world_key = ?',
+                    (user_id, world_key),
+                    fetchall=True
+                )
+            else:
+                rows = db_execute(
+                    'SELECT character_id, character_data '
+                    'FROM characters '
+                    'WHERE user_id = ?',
+                    (user_id,),
+                    fetchall=True
+                )
+
+            characters = []
+            for r in rows or []:
+                parsed = json.loads(r['character_data'])
+                # inject the UUID into the payload
+                parsed['CharacterId'] = r['character_id']
+                characters.append(parsed)
+
+            return jsonify(characters), 200
+
+        except Exception as e:
+            logging.error(f"Error loading characters: {e}")
+            return jsonify({'error': 'Failed to load characters'}), 500
+  
+
+
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # Character save per-world (POST)
+    # ──────────────────────────────────────────────────────────────────────────────
+    @app.route('/characters', methods=['POST'])
+    @token_required
+    @limiter.limit("30 per minute")
+    def save_character():
+        """
+        Inserts or updates a character JSON blob under the authenticated user
+        and specified world_key. Expects JSON payload:
+          { "world_key": "<world>",
+            "character_data": "<full JSON string>" }
+        Responds with the assigned characterId.
+        """
+        user_id = g.user_id
+        data    = sanitize_input(request.json or {})
+
+        # 1) Validate payload
+        if not all(k in data for k in ('world_key', 'character_data')):
+            return jsonify({'error': 'Missing world_key or character_data'}), 400
+
+        # 2) Parse out the CharacterName for upsert logic
+        try:
+            parsed         = json.loads(data['character_data'])
+            character_name = parsed.get('CharacterName')
+        except Exception:
+            return jsonify({'error': 'Invalid JSON in character_data'}), 400
+
+        if not character_name:
+            return jsonify({'error': 'character_data must include CharacterName'}), 400
+
+        world_key = data['world_key']
+
+        # 3) Check for existing record (also pull any existing character_id)
+        existing = db_execute(
+            'SELECT id, character_id FROM characters '
+            'WHERE user_id = ? AND world_key = ? AND character_name = ?',
+            (user_id, world_key, character_name),
+            fetchone=True
+        )
+
+        ts = int(time.time())
+        if existing:
+            # Update existing
+            db_execute(
+                'UPDATE characters '
+                'SET character_data = ?, updated_at = ? '
+                'WHERE id = ?',
+                (data['character_data'], ts, existing['id']),
+                commit=True
+            )
+            character_id = existing['character_id']
+        else:
+            # Insert new with a fresh UUID
+            character_id = str(uuid.uuid4())
+            db_execute(
+                'INSERT INTO characters '
+                '(user_id, world_key, character_id, character_name, character_data, created_at, updated_at) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?)',
+                (user_id, world_key, character_id, character_name,
+                 data['character_data'], ts, ts),
+                commit=True
+            )
+
+        return jsonify({
+            'message': 'Character saved successfully',
+            'characterId': character_id
+        }), 200
+
+
+    from werkzeug.exceptions import HTTPException
+
+    @app.errorhandler(Exception)
+    def handle_unhandled_exception(e):
+        """Global exception handler to prevent server crashes"""
+        if isinstance(e, HTTPException):
+            # Pass through HTTP errors (will be handled by Flask)
+            return e
+    
+        # Only log unexpected errors
+        logging.error(f"Unhandled exception: {str(e)}")
+        return jsonify({'error': 'An unexpected error occurred'}), 500
+
+
+    @app.errorhandler(404)
+    def not_found(e):
+        return jsonify({'error': 'The requested resource was not found'}), 404
+
+    @app.errorhandler(405)
+    def method_not_allowed(e):
+        return jsonify({'error': 'The method is not allowed for this endpoint'}), 405
+
+    @app.errorhandler(400)
+    def bad_request(e):
+        return jsonify({'error': 'Bad request - invalid data provided'}), 400
+
+
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # Delete character (POST)
+    # ──────────────────────────────────────────────────────────────────────────────
+    @app.route('/characters/delete', methods=['POST'])
+    @token_required
+    @limiter.limit("30 per minute")
+    def delete_character():
+        """
+        Deletes a character for the authenticated user in the specified world.
+        Expects JSON payload:
+          { "world_key": "<world>",
+            "character_name": "<name>" }
+        or optionally
+          { "world_key": "<world>",
+            "characterId": "<UUID>" }
+        """
+        user_id = g.user_id
+        data    = sanitize_input(request.json or {})
+
+        # Validate payload
+        if not data.get('world_key') or not (data.get('character_name') or data.get('characterId')):
+            return jsonify({'error': 'Missing world_key and either character_name or characterId'}), 400
+
+        world_key     = data['world_key']
+        character_id  = data.get('characterId')
+        character_name = data.get('character_name')
+
+        # Log the deletion request
+        logging.info(f"Deleting character for user={user_id} world={world_key} "
+                     f"{'(by id)' if character_id else '(by name)'}")
+
+        try:
+            # Fetch the row to ensure it belongs to this user
+            if character_id:
+                existing = db_execute(
+                    'SELECT id FROM characters '
+                    'WHERE user_id = ? AND world_key = ? AND character_id = ?',
+                    (user_id, world_key, character_id),
+                    fetchone=True
+                )
+            else:
+                existing = db_execute(
+                    'SELECT id FROM characters '
+                    'WHERE user_id = ? AND world_key = ? AND character_name = ?',
+                    (user_id, world_key, character_name),
+                    fetchone=True
+                )
+
+            if not existing:
+                return jsonify({'error': 'Character not found or access denied'}), 404
+
+            # Perform deletion
+            db_execute(
+                'DELETE FROM characters WHERE id = ?',
+                (existing['id'],),
+                commit=True
+            )
+
+            logging.info(f"Deleted character record id={existing['id']}")
+            return jsonify({'message': 'Character deleted successfully'}), 200
+
+        except Exception as e:
+            logging.error(f"Error deleting character: {e}")
+            return jsonify({'error': 'Failed to delete character due to a database error'}), 500
+
+
+
+
+    @app.route('/auth/admin/config', methods=['POST'])
+    @admin_required
+    def admin_update_config():
+        """Update a single configuration setting"""
+        data = sanitize_input(request.json or {})
+        if not data.get('setting'):
+            return jsonify({'error': 'setting required'}), 400
+        
+        setting = data['setting']
+        value = data.get('value')
+    
+        # Only allow updating certain settings through the API
+        allowed_settings = ['FORCE_JWT_ALGORITHM', 'JWT_AUDIENCE', 'JWT_ISSUER']
+        if setting not in allowed_settings:
+            return jsonify({'error': f'Setting {setting} cannot be updated through API'}), 403
+    
+        # Update the configuration
+        config[setting] = value
+        save_config(config)
+    
+        # Log the change
+        ip, _ = get_client_info()
+        log_security_event(
+            g.user_id, 'CONFIG_CHANGED',
+            f"Configuration setting {setting} changed to: {value}",
+            ip, 'medium'
+        )
+    
+        return jsonify({'message': f'Configuration setting {setting} updated successfully'}), 200
+
+    @app.route('/auth/admin/generate-keys', methods=['POST'])
+    @admin_required
+    def admin_generate_keys():
+        """Generate new RSA key pair for JWT signing"""
+        from auth import ensure_rsa_keys_exist
+    
+        # Generate new keys (overwriting existing ones)
+        try:
+            if ensure_rsa_keys_exist(force=True):
+                # Log the action
+                ip, _ = get_client_info()
+                log_security_event(
+                    g.user_id, 'KEYS_GENERATED',
+                    f"New RSA key pair generated for JWT signing",
+                    ip, 'high'
+                )
+                return jsonify({'message': 'New RSA key pair generated successfully'}), 200
+            else:
+                return jsonify({'error': 'Failed to generate new RSA keys'}), 500
+        except Exception as e:
+            logging.error(f"Failed to generate new RSA keys: {str(e)}")
+            return jsonify({'error': f'Error generating keys: {str(e)}'}), 500
+    # ──────────────────────────────────────────────────────────────────────────────
+    # Get a single character by CharacterId (for detail view, edit, or Unity compatibility)
+    # ──────────────────────────────────────────────────────────────────────────────
+    @app.route('/characters/by-id/<character_id>', methods=['GET'])
+    @token_required
+    def get_character_by_id(character_id):
+        """
+        Return one character for the authenticated user by CharacterId.
+        """
+        user_id = g.user_id
+        row = db_execute(
+            'SELECT character_data FROM characters WHERE user_id = ? AND character_id = ?',
+            (user_id, character_id),
+            fetchone=True
+        )
+        if not row:
+            return jsonify({'error': 'Character not found'}), 404
+        parsed = json.loads(row['character_data'])
+        parsed['CharacterId'] = character_id
+        return jsonify(parsed), 200
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # DELETE: Remove inventory by world, key, scene (optional for DGV/Unity)
+    # ──────────────────────────────────────────────────────────────────────────────
+    @app.route('/inventory/<world_key>/<key>/<scene>', methods=['DELETE'])
+    @token_required
+    def delete_inventory(world_key, key, scene):
+        user_id = g.user_id
+        db_execute(
+            'DELETE FROM inventory WHERE user_id = ? AND world_key = ? AND save_key = ? AND scene = ?',
+            (user_id, world_key, key, scene),
+            commit=True
+        )
+        return jsonify({'message': 'Inventory deleted successfully'}), 200
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # DELETE: Remove stats by world and key (optional for DGV/Unity)
+    # ──────────────────────────────────────────────────────────────────────────────
+    @app.route('/stats/<world_key>/<key>', methods=['DELETE'])
+    @token_required
+    def delete_stats(world_key, key):
+        user_id = g.user_id
+        db_execute(
+            'DELETE FROM stats WHERE user_id = ? AND world_key = ? AND save_key = ?',
+            (user_id, world_key, key),
+            commit=True
+        )
+        return jsonify({'message': 'Stats deleted successfully'}), 200
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # DELETE: Remove quests by world and key (optional for DGV/Unity)
+    # ──────────────────────────────────────────────────────────────────────────────
+    @app.route('/quests/<world_key>/<key>', methods=['DELETE'])
+    @token_required
+    def delete_quests(world_key, key):
+        user_id = g.user_id
+        db_execute(
+            'DELETE FROM quests WHERE user_id = ? AND world_key = ? AND save_key = ?',
+            (user_id, world_key, key),
+            commit=True
+        )
+        return jsonify({'message': 'Quests deleted successfully'}), 200
+
+    # ──────────────────────────────────────────────────────────────────────────────
+    # (Optional) DELETE: Remove a character directly by CharacterId (as an alternative to /characters/delete POST)
+    # ──────────────────────────────────────────────────────────────────────────────
+    @app.route('/characters/<world_key>/<character_id>', methods=['DELETE'])
+    @token_required
+    def delete_character_by_id(world_key, character_id):
+        """
+        Delete a character for the authenticated user by world_key and CharacterId.
+        """
+        user_id = g.user_id
+        # Check the character exists
+        row = db_execute(
+            'SELECT id FROM characters WHERE user_id = ? AND world_key = ? AND character_id = ?',
+            (user_id, world_key, character_id),
+            fetchone=True
+        )
+        if not row:
+            return jsonify({'error': 'Character not found or access denied'}), 404
+
+        db_execute(
+            'DELETE FROM characters WHERE id = ?',
+            (row['id'],),
+            commit=True
+        )
+        return jsonify({'message': 'Character deleted successfully'}), 200
+
+
+    @app.route('/join_world', methods=['POST'])
+    @token_required
+    def join_world():
+        """
+        Set the current world_key in the user's session.
+        Body: { "world_key": "..." }
+        """
+        user_id = g.user_id
+        data = request.json or {}
+        world_key = data.get('world_key')
+        if not world_key:
+            return jsonify({'error': 'world_key is required'}), 400
+
+        db_execute(
+            'UPDATE user_sessions SET world_key=? WHERE user_id=? AND is_valid=1 AND expires_at > ?',
+            (world_key, user_id, int(time.time())), commit=True
+        )
+        return jsonify({'message': f'Joined world {world_key}'}), 200
+
+    # Helper to identify table and column from the save_key
+    def _get_table_column(save_key: str):
+        if save_key.endswith(".Stats"):
+            return "stats", "stats_json"
+        if save_key.endswith(".ActiveQuests"):
+            return "quests", "active_quests"
+        if save_key.endswith(".CompletedQuests"):
+            return "quests", "completed_quests"
+        if save_key.endswith(".FailedQuests"):
+            return "quests", "failed_quests"
+        if save_key.endswith(".UI"):
+            return "inventory", "ui_data"
+        # scene keys look like "Player.SceneName"
+        # everything not ending in .UI is scene_data
+        if "." in save_key:
+            return "inventory", "scene_data"
+        if save_key == "":
+            # Optionally list available keys
+            return None, None
+        # no fallback -> let /data handle only stats/quests/inventory
+        return None, None
+
+    @app.route("/data/<world_key>/<path:save_key>", methods=["GET", "POST"])
+    def handle_data(world_key, save_key):
+        """
+        GET returns the JSON string for this user/world/save_key (empty if none),
+        POST upserts the raw JSON body into the appropriate table.
+        """
+        # 1) Authenticate user (extract user_id from JWT/session)
+        user_id = get_current_user_id()
+
+        table, column = _get_table_column(save_key)
+        if table is None:
+            # unsupported key
+            abort(404)
+
+        if request.method == "POST":
+            # Read the raw JSON body
+            payload = request.get_data(as_text=True) or ""
+            now     = int(time.time())
+
+            # Upsert into the table
+            db_execute(
+                f"""
+                INSERT INTO {table}
+                  (user_id, world_key, save_key, {column}, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, world_key, save_key)
+                DO UPDATE SET {column} = excluded.{column},
+                              updated_at = excluded.updated_at
+                """,
+                (user_id, world_key, save_key, payload, now),
+                commit=True
+            )
+            return ("", 200)
+
+        # GET branch
+        row = db_query_one(
+            f"""
+            SELECT {column} FROM {table}
+            WHERE user_id = ? AND world_key = ? AND save_key = ?
+            """,
+            (user_id, world_key, save_key)
+        )
+
+        if not row:
+            # No saved data yet -> return an “empty” value
+            if column in ("stats_json", "active_quests", "completed_quests", "failed_quests"):
+                empty = "[]"
+            else:
+                empty = ""
+            return empty, 200, {"Content-Type": "application/json"}
+
+        # Return the stored JSON blob
+        return row[column], 200, {"Content-Type": "application/json"}
+
+
+
+
+
+
+    return app
+    
+    
 
 # Instantiate the app
 app = create_app()
@@ -786,7 +1923,7 @@ if __name__ == '__main__':
                     return self.application
 
             options = {
-                'bind': f"{config["HOST"]}:{config["PORT"]}",
+                'bind': f"{config['HOST']}:{config['PORT']}",
                 'workers': config.get("WORKERS", 1),
                 'worker_class': 'sync',
                 'timeout': 60,

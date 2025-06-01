@@ -27,7 +27,7 @@ CONNECTION_TIMEOUT = 5      # Seconds to wait for a connection before timing out
 MAX_CONNECTION_AGE = 3600   # Maximum time to keep a connection open (1 hour)
 CONNECTION_CHECK_INTERVAL = 300  # How often to check connection health (5 minutes)
 
-# Database schema for SQLite
+# Extended Database Schema for SQLite
 DB_SCHEMA_SQLITE = '''
 CREATE TABLE IF NOT EXISTS schema_version (
   version INTEGER PRIMARY KEY,
@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   username TEXT UNIQUE,
-  email TEXT UNIQUE,
+  email TEXT,
   password TEXT,
   created_at INTEGER,
   last_login INTEGER,
@@ -72,6 +72,16 @@ CREATE TABLE IF NOT EXISTS security_events (
   description TEXT,
   ip_address TEXT,
   timestamp INTEGER,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS user_preferences (
+  user_id              TEXT PRIMARY KEY,
+  remember_me          INTEGER DEFAULT 0,
+  auto_login_server    INTEGER DEFAULT 0,
+  auto_login_character INTEGER DEFAULT 0,
+  last_server_id       TEXT,
+  last_character_name  TEXT,
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
@@ -111,6 +121,61 @@ CREATE TABLE IF NOT EXISTS security_events_extended (
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
+-- Game Data Tables for Persistence
+
+CREATE TABLE IF NOT EXISTS inventory (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  world_key TEXT NOT NULL,
+  save_key TEXT NOT NULL,
+  scene TEXT NOT NULL,
+  ui_data TEXT,
+  scene_data TEXT,
+  created_at INTEGER,
+  updated_at INTEGER,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS quests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  world_key TEXT NOT NULL,
+  save_key TEXT NOT NULL,
+  active_quests TEXT,
+  completed_quests TEXT,
+  failed_quests TEXT,
+  created_at INTEGER,
+  updated_at INTEGER,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS stats (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  world_key TEXT NOT NULL,
+  save_key TEXT NOT NULL,
+  stats_json TEXT,
+  stat_values_json TEXT,
+  attribute_values_json TEXT,
+  created_at INTEGER,
+  updated_at INTEGER,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS characters (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  world_key TEXT NOT NULL,
+  character_name TEXT NOT NULL,
+  character_id TEXT UNIQUE,
+  character_data TEXT,
+  is_active INTEGER DEFAULT 0,
+  created_at INTEGER,
+  updated_at INTEGER,
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  UNIQUE(user_id, world_key, character_name)
+);
+
 -- Create indexes for faster lookups
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions (user_id);
 CREATE INDEX IF NOT EXISTS idx_user_sessions_token ON user_sessions (token);
@@ -118,9 +183,14 @@ CREATE INDEX IF NOT EXISTS idx_user_sessions_is_valid ON user_sessions (is_valid
 CREATE INDEX IF NOT EXISTS idx_login_attempts_username ON login_attempts (username);
 CREATE INDEX IF NOT EXISTS idx_security_events_user_id ON security_events (user_id);
 CREATE INDEX IF NOT EXISTS idx_reset_tokens_user_id ON reset_tokens (user_id);
+
+-- Indexes for game data tables
+CREATE INDEX IF NOT EXISTS idx_inventory_user_world_scene ON inventory (user_id, world_key, save_key, scene);
+CREATE INDEX IF NOT EXISTS idx_quests_user_world_key ON quests (user_id, world_key, save_key);
+CREATE INDEX IF NOT EXISTS idx_stats_user_world_key ON stats (user_id, world_key, save_key);
+CREATE INDEX IF NOT EXISTS idx_characters_user_world_name ON characters (user_id, world_key, character_name);
 '''
 
-# MySQL schema with appropriate types
 DB_SCHEMA_MYSQL = '''
 CREATE TABLE IF NOT EXISTS schema_version (
   version INT PRIMARY KEY,
@@ -130,7 +200,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 CREATE TABLE IF NOT EXISTS users (
   id VARCHAR(36) PRIMARY KEY,
   username VARCHAR(30) UNIQUE,
-  email VARCHAR(100) UNIQUE,
+  email VARCHAR(100),
   password VARCHAR(255),
   created_at BIGINT,
   last_login BIGINT,
@@ -165,6 +235,16 @@ CREATE TABLE IF NOT EXISTS security_events (
   description TEXT,
   ip_address VARCHAR(45),
   timestamp BIGINT,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS user_preferences (
+  user_id              TEXT PRIMARY KEY,
+  remember_me          INTEGER DEFAULT 0,
+  auto_login_server    INTEGER DEFAULT 0,
+  auto_login_character INTEGER DEFAULT 0,
+  last_server_id       TEXT,
+  last_character_name  TEXT,
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
@@ -204,6 +284,61 @@ CREATE TABLE IF NOT EXISTS security_events_extended (
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
 
+-- Game Data Tables for Persistence
+
+CREATE TABLE IF NOT EXISTS inventory (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id VARCHAR(36) NOT NULL,
+  world_key VARCHAR(100) NOT NULL,
+  save_key VARCHAR(100) NOT NULL,
+  scene VARCHAR(100) NOT NULL,
+  ui_data MEDIUMTEXT,
+  scene_data MEDIUMTEXT,
+  created_at BIGINT,
+  updated_at BIGINT,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS quests (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id VARCHAR(36) NOT NULL,
+  world_key VARCHAR(100) NOT NULL,
+  save_key VARCHAR(100) NOT NULL,
+  active_quests MEDIUMTEXT,
+  completed_quests MEDIUMTEXT,
+  failed_quests MEDIUMTEXT,
+  created_at BIGINT,
+  updated_at BIGINT,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS stats (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id VARCHAR(36) NOT NULL,
+  world_key VARCHAR(100) NOT NULL,
+  save_key VARCHAR(100) NOT NULL,
+  stats_json MEDIUMTEXT,
+  stat_values_json MEDIUMTEXT,
+  attribute_values_json MEDIUMTEXT,
+  created_at BIGINT,
+  updated_at BIGINT,
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS characters (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id VARCHAR(36) NOT NULL,
+  world_key VARCHAR(100) NOT NULL,
+  character_id TEXT UNIQUE,
+  character_name VARCHAR(100) NOT NULL,
+  character_data MEDIUMTEXT,
+  is_active TINYINT DEFAULT 0,
+  created_at BIGINT,
+  updated_at BIGINT,
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  UNIQUE KEY uq_characters_user_world_name (user_id, world_key, character_name)
+);
+
 -- Create indexes for faster lookups
 CREATE INDEX idx_user_sessions_user_id ON user_sessions (user_id);
 CREATE INDEX idx_user_sessions_token ON user_sessions (token);
@@ -211,6 +346,12 @@ CREATE INDEX idx_user_sessions_is_valid ON user_sessions (is_valid);
 CREATE INDEX idx_login_attempts_username ON login_attempts (username);
 CREATE INDEX idx_security_events_user_id ON security_events (user_id);
 CREATE INDEX idx_reset_tokens_user_id ON reset_tokens (user_id);
+
+-- Indexes for game data tables
+CREATE INDEX idx_inventory_user_world_scene ON inventory (user_id, world_key, save_key, scene);
+CREATE INDEX idx_quests_user_world_key ON quests (user_id, world_key, save_key);
+CREATE INDEX idx_stats_user_world_key ON stats (user_id, world_key, save_key);
+CREATE INDEX idx_characters_user_world_name ON characters (user_id, world_key, character_name);
 '''
 
 # Global variable to hold the connection pool for MySQL
@@ -434,7 +575,6 @@ def get_sqlite_connection():
         )
     return _sqlite_pool.get_connection()
 
-
 # Initialize SQLite pool to None
 _sqlite_pool = None
 _mysql_pool = None
@@ -528,69 +668,113 @@ if config.get("DB_TYPE", "sqlite") == "mysql" and _has_mysql:
 
 @contextmanager
 def get_db_connection():
-        """Get a database connection with context manager for auto-close"""
-        if config.get("DB_TYPE", "sqlite") == "mysql" and _has_mysql:
-            # For MySQL databases
-            if _mysql_pool is None:
-                init_mysql_pool()
-            
-            conn = None
-            cursor = None
-            try:
-                conn = _mysql_pool.get_connection()
-                cursor = conn.cursor(dictionary=True)  # Similar to sqlite Row factory
-                yield cursor
-                conn.commit()
-            except Exception as e:
-                if conn:
-                    try:
-                        conn.rollback()
-                    except:
-                        pass
-                raise e
-            finally:
-                if cursor:
-                    try:
-                        cursor.close()
-                    except:
-                        pass
-                if conn:
-                    try:
-                        _mysql_pool.release(conn)  # Release back to the pool
-                    except:
-                        pass
-        else:
-            # For SQLite databases
-            conn = None
-            cursor = None
-            try:
-                conn = get_sqlite_connection()
-                cursor = conn.cursor()
-                yield cursor
-                # SQLite in autocommit mode doesn't need explicit commit
-            except Exception as e:
-                if conn:
-                    try:
-                        conn.rollback()
-                    except:
-                        pass
-                raise e
-            finally:
-                if cursor:
-                    try:
-                        cursor.close()
-                    except:
-                        pass
-                if conn:
-                    try:
-                        # This is the important part - make sure to release the connection back to the pool
-                        _sqlite_pool.release_connection(conn)
-                    except:
-                        pass        
+    """Get a database connection with context manager for auto-close"""
+    if config.get("DB_TYPE", "sqlite") == "mysql" and _has_mysql:
+        # For MySQL databases
+        if _mysql_pool is None:
+            init_mysql_pool()
+        
+        conn = None
+        cursor = None
+        try:
+            conn = _mysql_pool.get_connection()
+            cursor = conn.cursor(dictionary=True)  # Similar to sqlite Row factory
+            yield cursor
+            conn.commit()
+        except Exception:
+            if conn:
+                try:
+                    conn.rollback()
+                except:
+                    pass
+            raise  # Just use raise without e to preserve exception type
+        finally:
+            if cursor:
+                try:
+                    cursor.close()
+                except:
+                    pass
+            if conn:
+                try:
+                    _mysql_pool.release(conn)  # Release back to the pool
+                except:
+                    pass
+    else:
+        # For SQLite databases
+        conn = None
+        cursor = None
+        try:
+            conn = get_sqlite_connection()
+            cursor = conn.cursor()
+            yield cursor
+            # SQLite in autocommit mode doesn't need explicit commit
+        except Exception:
+            if conn:
+                try:
+                    conn.rollback()
+                except:
+                    pass
+            raise  # Just use raise without e to preserve exception type
+        finally:
+            if cursor:
+                try:
+                    cursor.close()
+                except:
+                    pass
+            if conn:
+                try:
+                    # This is the important part - make sure to release the connection back to the pool
+                    _sqlite_pool.release_connection(conn)
+                except:
+                    pass
+
+# ----------------------------------------------------------------------------
+# Helper functions for SQLite migrations (PLACE THESE HERE - MODULE LEVEL)
+# ----------------------------------------------------------------------------
+
+def is_safe_for_alter_table(col_def):
+    """Check if a column definition is safe for ALTER TABLE ADD COLUMN in SQLite"""
+    col_def_upper = col_def.upper()
+
+    # Skip if it contains constraints that ALTER TABLE ADD COLUMN can't handle
+    unsafe_keywords = [
+        'PRIMARY KEY',
+        'UNIQUE',
+        'FOREIGN KEY', 
+        'REFERENCES',
+        'CHECK',
+        'CONSTRAINT'
+    ]
+
+    for keyword in unsafe_keywords:
+        if keyword in col_def_upper:
+            return False
+        
+    return True
+
+def clean_column_definition(col_def):
+    """Clean column definition to make it safe for ALTER TABLE ADD COLUMN"""
+    # Remove everything after FOREIGN KEY, REFERENCES, etc.
+    import re
+    patterns_to_remove = [
+        r',?\s*FOREIGN KEY.*',
+        r',?\s*REFERENCES.*',
+        r',?\s*CONSTRAINT.*',
+        r',?\s*PRIMARY KEY.*',
+        r',?\s*UNIQUE.*',
+        r',?\s*CHECK.*'
+    ]
+
+    cleaned = col_def
+    for pattern in patterns_to_remove:
+        cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+
+    return cleaned.strip().rstrip(',')
 
 # ----------------------------------------------------------------------------
 # Core helpers and utilities
 # ----------------------------------------------------------------------------
+
 def ensure_parameterized_query(query, params):
     """
     Verify query placeholders match params count to reduce SQL injection risk.
@@ -628,7 +812,6 @@ def ensure_parameterized_query(query, params):
     
     return query, params
 
-
 def db_execute(query, params=(), commit=False, fetchone=False, fetchall=False):
     """Helper for database operations with automatic connection management"""
     try:
@@ -663,119 +846,262 @@ def db_execute(query, params=(), commit=False, fetchone=False, fetchall=False):
         logging.error(f"Database error in query '{query}': {e}")
         raise
 
-
 def init_db():
-    """Initialize the database with schema"""
+    """Initialize the database with schema & auto-migrations."""
     # Ensure backup directory exists
     if not os.path.exists(BACKUP_DIR):
         os.makedirs(BACKUP_DIR)
-        
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # MySQL branch
+    # ────────────────────────────────────────────────────────────────────────────
     if config.get("DB_TYPE", "sqlite") == "mysql" and _has_mysql:
-        # For MySQL - ensure database exists and create schema
         try:
-            # First connect to MySQL without specifying database to create if needed
-            cnx = None
-            cur = None
-            try:
-                cnx = pymysql.connect(
-                    host=config.get("DB_HOST", "localhost"),
-                    port=int(config.get("DB_PORT", 3306)),
-                    user=config.get("DB_USER", ""),
-                    password=config.get("DB_PASSWORD", ""),
-                    charset='utf8mb4',
-                    cursorclass=pymysql.cursors.DictCursor,
-                    connect_timeout=int(config.get("CONNECTION_TIMEOUT", 5))
+            cnx = pymysql.connect(
+                host=config.get("DB_HOST", "localhost"),
+                port=int(config.get("DB_PORT", 3306)),
+                user=config.get("DB_USER", ""),
+                password=config.get("DB_PASSWORD", ""),
+                charset='utf8mb4',
+                cursorclass=pymysql.cursors.DictCursor,
+                connect_timeout=int(config.get("CONNECTION_TIMEOUT", 5))
+            )
+            cur = cnx.cursor()
+
+            # 1) Create database if missing, then USE it
+            db_name = config.get("DB_NAME", "vespeyr_auth")
+            cur.execute(f"CREATE DATABASE IF NOT EXISTS `{db_name}`")
+            cur.execute(f"USE `{db_name}`")
+
+            # 2) Create all base tables
+            for stmt in DB_SCHEMA_MYSQL.strip().split(';'):
+                if stmt.strip():
+                    cur.execute(stmt)
+
+            # 3) Seed schema_version if empty
+            cur.execute("SELECT COUNT(*) as count FROM schema_version")
+            if cur.fetchone()['count'] == 0:
+                cur.execute(
+                    "INSERT INTO schema_version (version, applied_at) VALUES (%s, %s)",
+                    (1, int(time.time()))
                 )
-                
-                cur = cnx.cursor()
-                
-                # Create database if it doesn't exist
-                db_name = config.get("DB_NAME", "vespeyr_auth")
-                cur.execute(f"CREATE DATABASE IF NOT EXISTS `{db_name}`")
-                
-                # Switch to the database
-                cur.execute(f"USE `{db_name}`")
-                
-                # Create schema tables
-                for stmt in DB_SCHEMA_MYSQL.strip().split(';'):
-                    if stmt.strip():
-                        cur.execute(stmt)
-                
-                # Check if schema_version table is empty
-                cur.execute('SELECT COUNT(*) as count FROM schema_version')
-                result = cur.fetchone()
-                if result['count'] == 0:
-                    # Insert initial schema version
-                    cur.execute(
-                        'INSERT INTO schema_version VALUES (%s, %s)',
-                        (1, int(time.time()))
-                    )
-                    
-                cnx.commit()
-                
-                # Initialize connection pool after database is created
-                init_mysql_pool()
-                
-                logging.info(f"MySQL database '{db_name}' initialized successfully")
-                
-            except Exception as e:
-                logging.error(f"Failed to initialize MySQL database: {e}")
-                # Fall back to SQLite if configured
-                if config.get("FALLBACK_TO_SQLITE", True):
-                    logging.warning("Falling back to SQLite database")
-                    config["DB_TYPE"] = "sqlite"
-                else:
-                    raise
-            finally:
-                if cur:
-                    cur.close()
-                if cnx:
-                    cnx.close()
-                
+
+            # ─────────────────────────────────────────────────────────────
+            # AUTO-MIGRATE MISSING TABLES & COLUMNS (MySQL)
+            # ─────────────────────────────────────────────────────────────
+            import re
+
+            # fetch existing tables
+            cur.execute(
+                "SELECT TABLE_NAME FROM information_schema.tables WHERE table_schema = %s",
+                (db_name,)
+            )
+            existing_tables = {row['TABLE_NAME'] for row in cur.fetchall()}
+
+            # pull each CREATE TABLE stmt from master schema
+            mysql_stmts = re.findall(
+                r'CREATE TABLE IF NOT EXISTS [\s\S]+?\);',
+                DB_SCHEMA_MYSQL,
+                flags=re.IGNORECASE
+            )
+
+            for stmt in mysql_stmts:
+                m = re.match(
+                    r'CREATE TABLE IF NOT EXISTS\s+`?(\w+)`?\s*\(([\s\S]+)\)\s*;',
+                    stmt,
+                    flags=re.IGNORECASE
+                )
+                if not m:
+                    continue
+                table, cols_block = m.group(1), m.group(2)
+
+                if table not in existing_tables:
+                    # brand-new table
+                    cur.execute(stmt)
+                    continue
+
+                # fetch existing columns
+                cur.execute(
+                    "SELECT COLUMN_NAME FROM information_schema.columns "
+                    "WHERE table_schema = %s AND table_name = %s",
+                    (db_name, table)
+                )
+                existing_cols = {r['COLUMN_NAME'] for r in cur.fetchall()}
+
+                # for each declared column, add if missing
+                for col_line in cols_block.split(','):
+                    col_def = col_line.strip()
+                    nm = re.match(r'`?([A-Za-z0-9_]+)`?\s+(.+)', col_def)
+                    if not nm:
+                        continue
+                    col_name, col_body = nm.group(1), nm.group(2)
+                    if col_name not in existing_cols:
+                        cur.execute(f"ALTER TABLE `{table}` ADD COLUMN {col_body};")
+            # ─────────────────────────────────────────────────────────────
+
+            cnx.commit()
+            init_mysql_pool()
+            logging.info(f"MySQL database '{db_name}' initialized successfully")
+
         except Exception as e:
             logging.error(f"Failed to initialize MySQL database: {e}")
-            # Fall back to SQLite if configured
             if config.get("FALLBACK_TO_SQLITE", True):
                 logging.warning("Falling back to SQLite database")
                 config["DB_TYPE"] = "sqlite"
             else:
                 raise
-    
-    # Initialize SQLite if that's what we're using (either by default or fallback)
+        finally:
+            try:
+                if cur: cur.close()
+                if cnx: cnx.close()
+            except:
+                pass
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # SQLite branch
+    # ────────────────────────────────────────────────────────────────────────────
     if config.get("DB_TYPE", "sqlite") == "sqlite":
         conn = None
         cursor = None
         try:
+            # 1) Open connection & create base tables
             conn = sqlite3.connect(config.get("DB_PATH", "auth.db"))
             cursor = conn.cursor()
-            
-            # Execute schema creation
             for stmt in DB_SCHEMA_SQLITE.strip().split(';'):
                 if stmt.strip():
                     cursor.execute(stmt)
-            
-            # Check if schema_version table is empty
-            cursor.execute('SELECT COUNT(*) FROM schema_version')
-            result = cursor.fetchone()
-            if result[0] == 0:
-                # Insert initial schema version
+
+            # 2) Seed schema_version if empty
+            cursor.execute("SELECT COUNT(*) FROM schema_version")
+            if cursor.fetchone()[0] == 0:
                 cursor.execute(
-                    'INSERT INTO schema_version VALUES (?, ?)',
+                    "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                     (1, int(time.time()))
                 )
+
+            # ─────────────────────────────────────────────────────────────
+            # AUTO-MIGRATE MISSING TABLES & COLUMNS (SQLite) - IMPROVED VERSION
+            # ─────────────────────────────────────────────────────────────
+            import re, sqlite3 as _sqlite3
+
+            # Use a direct connection for migrations to avoid interfering with WAL
+            _conn = _sqlite3.connect(config.get("DB_PATH", "auth.db"))
+            _cur  = _conn.cursor()
+
+            # Get list of existing tables first
+            _cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            existing_tables = {row[0] for row in _cur.fetchall()}
+
+            # pull each CREATE TABLE stmt
+            stmts = re.findall(
+                r'CREATE TABLE IF NOT EXISTS [\s\S]+?\);',
+                DB_SCHEMA_SQLITE,
+                flags=re.IGNORECASE
+            )
+
+            for stmt in stmts:
+                m = re.match(
+                    r'CREATE TABLE IF NOT EXISTS\s+(\w+)\s*\(([\s\S]+)\)\s*;',
+                    stmt,
+                    flags=re.IGNORECASE
+                )
+                if not m:
+                    continue
+                table, cols_block = m.group(1), m.group(2)
+
+                if table not in existing_tables:
+                    # table missing -> create it
+                    logging.info(f"Creating missing table: {table}")
+                    _cur.execute(stmt)
+                    continue
+
+                # fetch existing columns
+                _cur.execute(f"PRAGMA table_info({table});")
+                existing_cols = {r[1] for r in _cur.fetchall()}
+    
+                logging.info(f"Table {table} has columns: {existing_cols}")
+
+                # Parse column definitions more carefully
+                column_definitions = []
+    
+                # Split by commas, but handle nested parentheses and quotes
+                current_def = ""
+                paren_depth = 0
+                in_quote = False
+                quote_char = None
+    
+                for char in cols_block:
+                    if char in ('"', "'") and not in_quote:
+                        in_quote = True
+                        quote_char = char
+                    elif char == quote_char and in_quote:
+                        in_quote = False
+                        quote_char = None
+                    elif char == '(' and not in_quote:
+                        paren_depth += 1
+                    elif char == ')' and not in_quote:
+                        paren_depth -= 1
+                    elif char == ',' and not in_quote and paren_depth == 0:
+                        column_definitions.append(current_def.strip())
+                        current_def = ""
+                        continue
             
+                    current_def += char
+    
+                # Add the last definition
+                if current_def.strip():
+                    column_definitions.append(current_def.strip())
+
+                # Process each column definition
+                for col_def in column_definitions:
+                    col_def = col_def.strip()
+        
+                    # Skip empty lines and constraint definitions
+                    if not col_def or col_def.upper().startswith(('FOREIGN KEY', 'CONSTRAINT', 'PRIMARY KEY', 'UNIQUE KEY')):
+                        continue
+
+                    # Extract column name - be more flexible with the regex
+                    nm = re.match(r'([A-Za-z0-9_]+)\s+(.+)', col_def)
+                    if not nm:
+                        logging.warning(f"Could not parse column definition: {col_def}")
+                        continue
+
+                    col_name = nm.group(1)
+                    col_definition = nm.group(2)
+
+                    if col_name not in existing_cols:
+                        logging.info(f"Adding missing column {col_name} to table {table}")
+            
+                        if is_safe_for_alter_table(col_def):
+                            try:
+                                # Clean the definition to remove unsafe parts
+                                safe_col_def = clean_column_definition(col_def)
+                                if safe_col_def:  # Only add if there's something left after cleaning
+                                    alter_sql = f"ALTER TABLE {table} ADD COLUMN {safe_col_def};"
+                                    logging.info(f"Executing: {alter_sql}")
+                                    _cur.execute(alter_sql)
+                                    logging.info(f"Successfully added column {col_name} to table {table}")
+                            except Exception as e:
+                                logging.error(f"Failed to add column {col_name} to table {table}: {e}")
+                        else:
+                            logging.info(f"Skipped column {col_name} (contains unsupported constraints for ALTER TABLE)")
+
+            _conn.commit()
+            _cur.close()
+            _conn.close()
+
             conn.commit()
             logging.info("SQLite database initialized successfully")
-            
+
         except Exception as e:
             logging.error(f"Failed to initialize SQLite database: {e}")
             raise
         finally:
-            if cursor:
-                cursor.close()
-            if conn:
-                conn.close()
-
+            try:
+                if cursor: cursor.close()
+                if conn: conn.close()
+            except:
+                pass
 
 def backup_database():
     """Create a timestamped backup of the current database."""
@@ -824,7 +1150,6 @@ def backup_database():
             logging.error(f"SQLite backup error: {e}")
             return False
 
-
 def cleanup_old_backups(extension=".db"):
     """Prune backups to keep only the newest MAX_BACKUPS."""
     if not os.path.exists(BACKUP_DIR): 
@@ -844,7 +1169,6 @@ def cleanup_old_backups(extension=".db"):
                 logging.info(f"Removed old backup: {old}")
             except Exception as e: 
                 logging.error(f"Failed to remove old backup {old}: {e}")
-
 
 def log_security_event(user_id, event_type, description,
                        ip_address=None, user_agent=None,
@@ -894,8 +1218,6 @@ def log_security_event(user_id, event_type, description,
         logging.error(f"Failed to log security event: {e}")
         return False
 
-
-
 def get_connection_pool_stats():
     """Return current metrics and pool sizes."""
     stats = _pool_metrics.copy()
@@ -907,7 +1229,6 @@ def get_connection_pool_stats():
         stats['in_use'] = len(_sqlite_pool.in_use)
     stats['uptime'] = time.time()-stats['last_reset']
     return stats
-
 
 def reset_connection_pool():
     """Reinitialize pools and reset metrics."""
@@ -1106,3 +1427,15 @@ def vacuum_database():
         except Exception as e:
             logging.error(f"Database optimization failed: {e}")
             return False
+
+def db_query_one(query, params=()):
+    """
+    Execute `query` with `params` and return a single row (or None).
+    """
+    return db_execute(query, params, fetchone=True)
+
+def db_query_all(query, params=()):
+    """
+    Execute `query` with `params` and return all rows (possibly an empty list).
+    """
+    return db_execute(query, params, fetchall=True)

@@ -38,6 +38,7 @@
     <Compile Include="gui\base.py" />
     <Compile Include="gui\app_controller.py" />
     <Compile Include="gui\__init__.py" />
+    <Compile Include="migrate_add_world_key.py" />
     <Compile Include="README.md" />
     <Compile Include="auth.py" />
     <Compile Include="redis_service.py" />
@@ -49,6 +50,7 @@
     <Compile Include="server.py" />
     <Compile Include="tk_update_manager.py" />
     <Compile Include="tk_theme_manager.py" />
+    <Compile Include="token_debugger.py" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="gui\" />
@@ -56,7 +58,6 @@
   </ItemGroup>
   <ItemGroup>
     <Content Include="manifest.json" />
-    <Content Include="scrollbar-fix.patch" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
   <!-- Uncomment the CoreCompile target to enable the Build command in

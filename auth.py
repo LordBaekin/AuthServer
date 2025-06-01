@@ -8,12 +8,100 @@ import logging
 import hashlib
 import os
 import json
+import sys
 from functools import wraps
-from flask import g, request, jsonify
+from flask import g, request, jsonify, abort
 from datetime import datetime, timedelta
-
-from db import db_execute, log_security_event
+import jwt 
+from db import db_execute, log_security_event, db_query_one
 from config import config
+
+
+
+
+
+def get_current_user_id():
+    """
+    Extract the Bearer token from Authorization,
+    verify it against your user_sessions table,
+    and return the corresponding user_id.
+    """
+    auth  = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        abort(401, "Missing or malformed Authorization header")
+    token = auth.split(None, 1)[1]
+
+    # look up the session
+    row = db_query_one(
+        "SELECT user_id FROM user_sessions "
+        "WHERE token = ? AND is_valid = 1 AND expires_at > ?",
+        (token, int(time.time()))
+    )
+    if not row:
+        abort(401, "Invalid or expired token")
+
+    return row["user_id"]
+
+
+
+
+
+# Path to RSA key files
+PRIVATE_KEY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'private_key.pem')
+PUBLIC_KEY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'public_key.pem')
+
+def ensure_rsa_keys_exist(force=False):
+    """Generate RSA keys if they don't exist or force is True"""
+    if not os.path.exists(PRIVATE_KEY_PATH) or not os.path.exists(PUBLIC_KEY_PATH) or force:
+        try:
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric import rsa
+            from cryptography.hazmat.backends import default_backend
+            
+            # Generate private key
+            private_key = rsa.generate_private_key(
+                public_exponent=65537,
+                key_size=2048,
+                backend=default_backend()
+            )
+            
+            # Save private key
+            pem_private = private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption()
+            )
+            with open(PRIVATE_KEY_PATH, 'wb') as f:
+                f.write(pem_private)
+            
+            # Save public key
+            public_key = private_key.public_key()
+            pem_public = public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            with open(PUBLIC_KEY_PATH, 'wb') as f:
+                f.write(pem_public)
+                
+            action = "Generated" if not force else "Regenerated"
+            logging.info(f"{action} new RSA key pair at {PRIVATE_KEY_PATH} and {PUBLIC_KEY_PATH}")
+            return True
+        except ImportError:
+            logging.error("cryptography package not installed. Install with: pip install cryptography")
+            return False
+        except Exception as e:
+            logging.error(f"Failed to generate RSA keys: {str(e)}")
+            return False
+    return True
+
+# Ensure RSA keys exist at module load time
+try:
+    if not ensure_rsa_keys_exist():
+        logging.error("Failed to ensure RSA keys exist. JWT signing will fail!")
+        # Uncomment the following line if you want to force the server to exit on missing keys
+        # sys.exit(1)
+except Exception as e:
+    logging.error(f"Critical error ensuring RSA keys: {e}")
 
 # Redis connection for token blacklist (initialize later)
 try:
@@ -152,8 +240,6 @@ def sanitize_input(data):
         return [sanitize_input(item) for item in data]
     else:
         return data
-
-from flask import request
 
 def get_client_info():
     """
@@ -300,9 +386,9 @@ def update_login_attempt(username, success, ip_address, user_agent):
         return False
 
 def create_access_token(user_id, additional_data=None):
-    """Generate a new JWT access token for the given user"""
+    """Generate a new JWT access token for the given user with Coherence Cloud claims"""
     # Get shorter expiration for access tokens
-    expiration = int(time.time()) + config.get("ACCESS_TOKEN_EXPIRATION", 3600)
+    expiration = int(time.time()) + config.get("JWT_EXPIRATION", 3600)
     
     # Generate a random token ID (jti)
     token_id = str(uuid.uuid4())
@@ -313,18 +399,24 @@ def create_access_token(user_id, additional_data=None):
     # Create a fingerprint for the client
     fingerprint = hashlib.sha256(f"{client_ip}:{user_agent}".encode()).hexdigest()
     
+    # Base payload with standard JWT claims
     payload = {
         'user_id': user_id,
         'exp': expiration,
         'iat': int(time.time()),
         'jti': token_id,
         'type': 'access',
-        'fingerprint': fingerprint
+        'fingerprint': fingerprint,
+        # Add the following required claims for Coherence Cloud
+        'iss': config.get("JWT_ISSUER", "vespeyr-auth-server"),
+        'aud': config.get("JWT_AUDIENCE", "coherence-cloud-api"),
+        'sub': str(user_id)  # Ensure subject is a string
     }
     
+    # Add any additional user data to the payload
     if additional_data:
         payload.update(additional_data)
-        
+    
     # Add token to the database for tracking
     try:
         timestamp = int(time.time())
@@ -347,12 +439,29 @@ def create_access_token(user_id, additional_data=None):
     except Exception as e:
         logging.error(f"Failed to record token in database: {str(e)}")
     
-    # Use the specified algorithm from config
-    algorithm = config.get("TOKEN_ALGORITHM", "HS256")
-    return jwt.encode(payload, config["JWT_SECRET"], algorithm=algorithm)
+    # ALWAYS USE RS256 FOR COHERENCE CLOUD
+    try:
+        # Check if private key exists
+        if not os.path.exists(PRIVATE_KEY_PATH):
+            # Try to generate it first
+            if not ensure_rsa_keys_exist(force=True):
+                raise ValueError("Failed to generate RSA keys needed for JWT signing")
+        
+        # Read the private key and use RS256    
+        with open(PRIVATE_KEY_PATH, 'r') as key_file:
+            private_key = key_file.read()
+            
+        token = jwt.encode(payload, private_key, algorithm="RS256")
+        logging.info(f"Generated RS256 JWT token for user {user_id}")
+        return token
+    except Exception as e:
+        logging.error(f"Failed to sign token with RS256: {e}")
+        # If we absolutely need a fallback, we could use HS256 but that won't work with Coherence
+        # Instead, let the error propagate
+        raise ValueError(f"Cannot create JWT token: {e}")
 
 def create_refresh_token(user_id):
-    """Generate a refresh token with longer expiration"""
+    """Generate a refresh token with longer expiration and Coherence Cloud claims"""
     # Get longer expiration for refresh tokens
     expiration = int(time.time()) + config.get("REFRESH_TOKEN_EXPIRATION", 2592000)
     
@@ -365,13 +474,18 @@ def create_refresh_token(user_id):
     # Create a fingerprint for the client
     fingerprint = hashlib.sha256(f"{client_ip}:{user_agent}".encode()).hexdigest()
     
+    # Create payload with Coherence Cloud required claims
     payload = {
         'user_id': user_id,
         'exp': expiration,
         'iat': int(time.time()),
         'jti': token_id,
         'type': 'refresh',
-        'fingerprint': fingerprint
+        'fingerprint': fingerprint,
+        # Add the following required claims for Coherence Cloud
+        'iss': config.get("JWT_ISSUER", "vespeyr-auth-server"),
+        'aud': config.get("JWT_AUDIENCE", "coherence-cloud-api"),
+        'sub': str(user_id)  # Ensure subject is a string
     }
     
     # Add token to the database for tracking
@@ -387,16 +501,57 @@ def create_refresh_token(user_id):
     except Exception as e:
         logging.error(f"Failed to record refresh token in database: {str(e)}")
     
-    # Use the specified algorithm from config
-    algorithm = config.get("TOKEN_ALGORITHM", "HS256")
-    return jwt.encode(payload, config["JWT_SECRET"], algorithm=algorithm)
+    # ALWAYS USE RS256 FOR COHERENCE CLOUD
+    try:
+        # Check if private key exists
+        if not os.path.exists(PRIVATE_KEY_PATH):
+            # Try to generate it first
+            if not ensure_rsa_keys_exist(force=True):
+                raise ValueError("Failed to generate RSA keys needed for JWT signing")
+        
+        # Read the private key and use RS256    
+        with open(PRIVATE_KEY_PATH, 'r') as key_file:
+            private_key = key_file.read()
+            
+        token = jwt.encode(payload, private_key, algorithm="RS256")
+        logging.info(f"Generated RS256 JWT refresh token for user {user_id}")
+        return token
+    except Exception as e:
+        logging.error(f"Failed to sign refresh token with RS256: {e}")
+        # If we absolutely need a fallback, we could use HS256 but that won't work with Coherence
+        # Instead, let the error propagate
+        raise ValueError(f"Cannot create JWT refresh token: {e}")
 
 def verify_token(token):
     """Verify a JWT token and return its payload"""
     try:
-        # Use the specified algorithm from config
-        algorithm = config.get("TOKEN_ALGORITHM", "HS256")
-        payload = jwt.decode(token, config["JWT_SECRET"], algorithms=[algorithm])
+        # Get the token header without verification to determine algorithm
+        unverified_header = jwt.get_unverified_header(token)
+        algorithm = unverified_header.get('alg', 'HS256')
+        
+        if algorithm == 'RS256':
+            # RSA verification
+            if not os.path.exists(PUBLIC_KEY_PATH):
+                logging.error(f"Cannot verify RS256 token: Public key not found at {PUBLIC_KEY_PATH}")
+                return None
+                
+            with open(PUBLIC_KEY_PATH, 'r') as key_file:
+                public_key = key_file.read()
+            payload = jwt.decode(
+                token, 
+                public_key, 
+                algorithms=["RS256"],
+                audience=config.get("JWT_AUDIENCE", "coherence-cloud-api"),
+                options={"verify_aud": True}
+            )
+        else:
+            # HMAC verification - keep for legacy tokens but can be removed in the future
+            logging.warning("Verifying token with HS256 - this will not work with Coherence Cloud")
+            payload = jwt.decode(
+                token, 
+                config["JWT_SECRET"], 
+                algorithms=["HS256"]
+            )
         
         # Check if token is blacklisted
         if is_token_blacklisted(payload.get('jti')):
@@ -462,9 +617,22 @@ def is_token_blacklisted(token_id):
 def blacklist_token(token):
     """Add a token to the blacklist"""
     try:
-        # Decode the token to get its ID and expiration
-        algorithm = config.get("TOKEN_ALGORITHM", "HS256")
-        payload = jwt.decode(token, config["JWT_SECRET"], algorithms=[algorithm])
+        # Get the token header without verification to determine algorithm
+        unverified_header = jwt.get_unverified_header(token)
+        algorithm = unverified_header.get('alg', 'HS256')
+        
+        if algorithm == 'RS256':
+            # RSA verification
+            if not os.path.exists(PUBLIC_KEY_PATH):
+                logging.error(f"Cannot verify RS256 token: Public key not found at {PUBLIC_KEY_PATH}")
+                return False
+                
+            with open(PUBLIC_KEY_PATH, 'r') as key_file:
+                public_key = key_file.read()
+            payload = jwt.decode(token, public_key, algorithms=["RS256"])
+        else:
+            # HMAC verification
+            payload = jwt.decode(token, config["JWT_SECRET"], algorithms=["HS256"])
         
         token_id = payload.get('jti')
         token_exp = payload.get('exp')
@@ -678,3 +846,225 @@ def track_login_attempts(username, ip, success=False):
     except Exception as e:
         logging.error(f"Database login tracking error: {str(e)}")
         return 0
+
+def get_user_by_id(user_id):
+    """
+    Retrieve a user by their ID
+    Returns user dict or None if not found
+    """
+    try:
+        user = db_execute(
+            'SELECT id, username, email, created_at, last_login, login_count, account_status FROM users WHERE id = ?',
+            (user_id,),
+            fetchone=True
+        )
+        return user
+    except Exception as e:
+        logging.error(f"Error getting user by ID {user_id}: {e}")
+        return None
+
+def get_user_by_username(username):
+    """
+    Retrieve a user by their username
+    Returns user dict or None if not found
+    """
+    try:
+        user = db_execute(
+            'SELECT id, username, email, password, created_at, last_login, login_count, account_status, failed_login_count FROM users WHERE username = ?',
+            (username,),
+            fetchone=True
+        )
+        return user
+    except Exception as e:
+        logging.error(f"Error getting user by username {username}: {e}")
+        return None
+
+def update_user(user_id, **kwargs):
+    """
+    Update user information
+    
+    Args:
+        user_id: The user's ID
+        **kwargs: Fields to update (email, last_login, login_count, etc.)
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        if not kwargs:
+            return True  # Nothing to update
+            
+        # Build dynamic update query
+        valid_fields = ['email', 'last_login', 'login_count', 'account_status', 'failed_login_count', 'last_password_change']
+        
+        # Filter out invalid fields
+        update_fields = {k: v for k, v in kwargs.items() if k in valid_fields}
+        
+        if not update_fields:
+            logging.warning(f"No valid fields to update for user {user_id}")
+            return False
+            
+        # Build SET clause
+        set_clause = ', '.join([f"{field} = ?" for field in update_fields.keys()])
+        values = list(update_fields.values()) + [user_id]
+        
+        query = f"UPDATE users SET {set_clause} WHERE id = ?"
+        
+        db_execute(query, values, commit=True)
+        
+        logging.info(f"Updated user {user_id} with fields: {list(update_fields.keys())}")
+        return True
+        
+    except Exception as e:
+        logging.error(f"Error updating user {user_id}: {e}")
+        return False
+
+def create_user(username, email, password):
+    """
+    Create a new user account
+    
+    Args:
+        username: User's chosen username
+        email: User's email address  
+        password: User's password (will be hashed)
+        
+    Returns:
+        tuple: (bool success, str user_id_or_error_message)
+    """
+    try:
+        # Validate inputs
+        username = sanitize_input(username)
+        email = sanitize_input(email)
+        
+        if not is_valid_username(username):
+            return False, "Invalid username format"
+            
+        if not is_valid_email(email):
+            return False, "Invalid email format"
+            
+        # Check password strength
+        password_valid, password_msg = check_password_strength(password)
+        if not password_valid:
+            return False, password_msg
+            
+        # Check if username already exists
+        existing_user = get_user_by_username(username)
+        if existing_user:
+            return False, "Username already exists"
+            
+        # Check if email already exists
+        existing_email = db_execute(
+            'SELECT id FROM users WHERE email = ?',
+            (email,),
+            fetchone=True
+        )
+        if existing_email:
+            return False, "Email already registered"
+            
+        # Hash password
+        password_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+        
+        # Generate user ID
+        user_id = str(uuid.uuid4())
+        timestamp = int(time.time())
+        
+        # Create user
+        db_execute(
+            '''INSERT INTO users 
+               (id, username, email, password, created_at, last_login, login_count, account_status, failed_login_count, last_password_change) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (user_id, username, email, password_hash, timestamp, 0, 0, 'active', 0, timestamp),
+            commit=True
+        )
+        
+        # Log security event
+        ip, user_agent = get_client_info() if hasattr(request, 'remote_addr') else ('unknown', 'unknown')
+        log_security_event(
+            user_id,
+            'USER_CREATED',
+            f"New user account created: {username}",
+            ip,
+            user_agent,
+            'low'
+        )
+        
+        logging.info(f"Created new user: {username} (ID: {user_id})")
+        return True, user_id
+        
+    except Exception as e:
+        logging.error(f"Error creating user {username}: {e}")
+        return False, f"Account creation failed: {str(e)}"
+
+def change_user_password(user_id, old_password, new_password):
+    """
+    Change a user's password
+    
+    Args:
+        user_id: The user's ID
+        old_password: Current password for verification
+        new_password: New password to set
+        
+    Returns:
+        tuple: (bool success, str message)
+    """
+    try:
+        # Get current user
+        user = get_user_by_id(user_id)
+        if not user:
+            return False, "User not found"
+            
+        # Get full user info including password
+        user_with_password = db_execute(
+            'SELECT password FROM users WHERE id = ?',
+            (user_id,),
+            fetchone=True
+        )
+        
+        if not user_with_password:
+            return False, "User not found"
+            
+        # Verify old password
+        if not bcrypt.checkpw(old_password.encode('utf-8'), user_with_password['password']):
+            return False, "Current password is incorrect"
+            
+        # Check new password strength
+        password_valid, password_msg = check_password_strength(new_password)
+        if not password_valid:
+            return False, password_msg
+            
+        # Check password history
+        history_valid, history_msg = check_password_history(user_id, new_password)
+        if not history_valid:
+            return False, history_msg
+            
+        # Hash new password
+        new_password_hash = bcrypt.hashpw(new_password.encode('utf-8'), bcrypt.gensalt())
+        timestamp = int(time.time())
+        
+        # Update password
+        db_execute(
+            'UPDATE users SET password = ?, last_password_change = ? WHERE id = ?',
+            (new_password_hash, timestamp, user_id),
+            commit=True
+        )
+        
+        # Log security event
+        ip, user_agent = get_client_info() if hasattr(request, 'remote_addr') else ('unknown', 'unknown')
+        log_security_event(
+            user_id,
+            'PASSWORD_CHANGED',
+            "User changed their password",
+            ip,
+            user_agent,
+            'medium'
+        )
+        
+        # Revoke all existing tokens to force re-login
+        revoke_all_user_tokens(user_id)
+        
+        logging.info(f"Password changed for user {user_id}")
+        return True, "Password changed successfully"
+        
+    except Exception as e:
+        logging.error(f"Error changing password for user {user_id}: {e}")
+        return False, "Failed to change password"

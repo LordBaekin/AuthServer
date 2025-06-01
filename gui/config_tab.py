@@ -66,7 +66,7 @@ class ConfigTab(BaseTab):
         config_sections = {
             'Server': ['DB_TYPE', 'HOST', 'PORT', 'SERVER_TYPE', 'WORKERS', 'DEBUG_MODE', 
                       'ENABLE_HTTPS_REDIRECT', 'ALLOWED_ORIGINS', 'APP_NAME', 'COMPANY_NAME'],
-            'Security': ['JWT_SECRET', 'JWT_EXPIRATION', 'REFRESH_TOKEN_EXPIRATION', 
+            'Security': ['JWT_SECRET', 'JWT_ISSUER', 'JWT_AUDIENCE', 'JWT_EXPIRATION', 'REFRESH_TOKEN_EXPIRATION', 
                         'SECURE_COOKIES', 'SESSION_TIMEOUT'],
             'Passwords': ['PASSWORD_MIN_LENGTH', 'PASSWORD_REQUIRE_MIXED_CASE', 
                          'PASSWORD_REQUIRE_DIGIT', 'PASSWORD_REQUIRE_SPECIAL', 'PASSWORD_HISTORY_COUNT'],

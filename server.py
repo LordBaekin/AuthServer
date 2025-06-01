@@ -25,7 +25,6 @@ def signal_handler(sig, frame):
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
-# Setup logging
 def setup_logging():
     """Set up application logging"""
     if not os.path.exists(LOG_DIR):
@@ -80,7 +79,7 @@ def setup_logging():
     security_handler = RotatingFileHandler(
         os.path.join(LOG_DIR, 'security.log'),
         maxBytes=1024 * 1024 * 5,  # 5MB
-        backupCount=30  # Keep more security logs
+        backupCount=30
     )
     security_handler.setFormatter(logging.Formatter(
         '%(asctime)s - %(message)s'
@@ -94,7 +93,7 @@ def setup_logging():
     console_handler.setFormatter(logging.Formatter(
         '%(asctime)s %(levelname)s: %(message)s'
     ))
-    console_handler.setLevel(logging.INFO)
+    console_handler.setLevel(log_level)     # <-- changed from INFO to use configured level
     root_logger.addHandler(console_handler)
     
     logging.info(f'Auth server v{APP_VERSION} logging initialized')
