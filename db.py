@@ -91,6 +91,8 @@ CREATE TABLE IF NOT EXISTS user_sessions (
   created_at INTEGER,
   expires_at INTEGER,
   ip_address TEXT,
+
+  world_key TEXT DEFAULT NULL,
   user_agent TEXT,
   last_active INTEGER,
   is_valid INTEGER DEFAULT 1,
@@ -133,8 +135,10 @@ CREATE TABLE IF NOT EXISTS inventory (
   scene_data TEXT,
   created_at INTEGER,
   updated_at INTEGER,
-  FOREIGN KEY (user_id) REFERENCES users(id)
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  CONSTRAINT uq_inventory_user_world_save UNIQUE (user_id, world_key, save_key)
 );
+
 
 CREATE TABLE IF NOT EXISTS quests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,8 +150,10 @@ CREATE TABLE IF NOT EXISTS quests (
   failed_quests TEXT,
   created_at INTEGER,
   updated_at INTEGER,
-  FOREIGN KEY (user_id) REFERENCES users(id)
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  CONSTRAINT uq_quests_user_world_save UNIQUE (user_id, world_key, save_key)
 );
+
 
 CREATE TABLE IF NOT EXISTS stats (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -159,8 +165,10 @@ CREATE TABLE IF NOT EXISTS stats (
   attribute_values_json TEXT,
   created_at INTEGER,
   updated_at INTEGER,
-  FOREIGN KEY (user_id) REFERENCES users(id)
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  CONSTRAINT uq_stats_user_world_save UNIQUE (user_id, world_key, save_key)
 );
+
 
 CREATE TABLE IF NOT EXISTS characters (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -173,8 +181,18 @@ CREATE TABLE IF NOT EXISTS characters (
   created_at INTEGER,
   updated_at INTEGER,
   FOREIGN KEY (user_id) REFERENCES users(id),
-  UNIQUE(user_id, world_key, character_name)
+  CONSTRAINT uq_user_world_character UNIQUE (user_id, world_key, character_name)
 );
+
+
+
+CREATE TABLE IF NOT EXISTS character_data (
+  world_key TEXT NOT NULL,
+  character_id TEXT NOT NULL,
+  character_data TEXT,
+  PRIMARY KEY (world_key, character_id)
+);
+
 
 -- Create indexes for faster lookups
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions (user_id);
@@ -254,6 +272,8 @@ CREATE TABLE IF NOT EXISTS user_sessions (
   created_at BIGINT,
   expires_at BIGINT,
   ip_address VARCHAR(45),
+
+  world_key  VARCHAR(128)  DEFAULT NULL,
   user_agent VARCHAR(255),
   last_active BIGINT,
   is_valid TINYINT DEFAULT 1,
@@ -338,6 +358,20 @@ CREATE TABLE IF NOT EXISTS characters (
   FOREIGN KEY (user_id) REFERENCES users(id),
   UNIQUE KEY uq_characters_user_world_name (user_id, world_key, character_name)
 );
+
+
+CREATE TABLE IF NOT EXISTS character_data (
+  world_key VARCHAR(100) NOT NULL,
+  character_id VARCHAR(100) NOT NULL,
+  character_data MEDIUMTEXT,
+  PRIMARY KEY (world_key, character_id)
+);
+
+
+
+
+
+
 
 -- Create indexes for faster lookups
 CREATE INDEX idx_user_sessions_user_id ON user_sessions (user_id);
@@ -815,13 +849,11 @@ def ensure_parameterized_query(query, params):
 def db_execute(query, params=(), commit=False, fetchone=False, fetchall=False):
     """Helper for database operations with automatic connection management"""
     try:
-        # Make a copy of the original query
+        db_type = config.get("DB_TYPE", "sqlite").lower()
         adjusted_query = query
-        
-        # Only adjust for MySQL if we're actually using MySQL
-        if config.get("DB_TYPE", "sqlite") == "mysql" and _has_mysql:
-            # Replace ? with %s for MySQL, but only if not in a string literal
-            # This is a simple approach - a full parser would be more robust
+
+        # Adjust placeholders for MySQL if needed
+        if db_type == "mysql" and _has_mysql:
             adjusted_query = ""
             in_string = False
             for char in query:
@@ -831,20 +863,29 @@ def db_execute(query, params=(), commit=False, fetchone=False, fetchall=False):
                     adjusted_query += '%s'
                 else:
                     adjusted_query += char
-        
+
         with get_db_connection() as cursor:
+            # Special handling for SQLite multi-statement schema
+            if db_type == "sqlite" and ";" in query and not params:
+                cursor.executescript(adjusted_query)
+                return None
+
             cursor.execute(adjusted_query, params)
-            
-            result = None
+
+            if commit:
+                cursor.connection.commit()
+
             if fetchone:
-                result = cursor.fetchone()
+                return cursor.fetchone()
             elif fetchall:
-                result = cursor.fetchall()
-            
-            return result
+                return cursor.fetchall()
+
+            return None
+
     except Exception as e:
         logging.error(f"Database error in query '{query}': {e}")
         raise
+
 
 def init_db():
     """Initialize the database with schema & auto-migrations."""
