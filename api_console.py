@@ -7,7 +7,7 @@ import os
 import pathlib
 
 class ApiConsoleFrame(ttk.Frame):
-    def __init__(self, master, api_base="http://localhost:5000"):
+    def __init__(self, master, api_base="https://api.vespeyr.com:5000"):
         super().__init__(master)
         self.api_base = api_base.rstrip("/")
         self.access_token = None

@@ -12,7 +12,7 @@ import json
 import sqlite3
 import traceback
 from db import db_query_all
-
+import re
 from redis_service import get_redis_client
 
 # Flask imports
@@ -1127,6 +1127,7 @@ def create_app(test_config=None):
 
 
     @app.route('/inventory', methods=['POST'])
+    @limiter.exempt
     @token_required
     def save_inventory():
         """
@@ -1192,6 +1193,24 @@ def create_app(test_config=None):
         )
         return jsonify({'message':'Inventory saved successfully'}), 200
 
+    @app.route('/inventory/<world_key>', methods=['GET', 'POST'])
+    def handle_inventory(world_key):
+        save_key = request.args.get('save_key') if request.method == 'GET' else request.json.get('save_key')
+        if not save_key:
+            return jsonify({'error': 'Missing save_key'}), 400
+
+        full_key = f"{world_key}.inventory.{save_key}"
+
+        if request.method == 'POST':
+            try:
+                inventory_data = request.json.get('data', '')
+                db_execute("REPLACE INTO data_store (key, value) VALUES (?, ?)", (full_key, inventory_data))
+                return jsonify({'success': True})
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+        else:  # GET
+            result = db_execute("SELECT value FROM data_store WHERE key = ?", (full_key,), fetchone=True)
+            return jsonify({'data': result[0] if result else ''})
 
 
     @app.route('/quests/<world_key>/<key>', methods=['GET'])
@@ -1337,6 +1356,24 @@ def create_app(test_config=None):
         )
         return jsonify({'message': 'Quests saved successfully'}), 200
 
+    @app.route('/quests/<world_key>', methods=['GET', 'POST'])
+    def handle_quests(world_key):
+        save_key = request.args.get('save_key') if request.method == 'GET' else request.json.get('save_key')
+        if not save_key:
+            return jsonify({'error': 'Missing save_key'}), 400
+
+        full_key = f"{world_key}.quests.{save_key}"
+
+        if request.method == 'POST':
+            try:
+                quest_data = request.json.get('data', '')
+                db_execute("REPLACE INTO data_store (key, value) VALUES (?, ?)", (full_key, quest_data))
+                return jsonify({'success': True})
+            except Exception as e:
+                return jsonify({'error': str(e)}), 500
+        else:  # GET
+            result = db_execute("SELECT value FROM data_store WHERE key = ?", (full_key,), fetchone=True)
+            return jsonify({'data': result[0] if result else ''})
 
 
     @app.route('/stats/<world_key>/<key>', methods=['GET'])
@@ -2212,6 +2249,508 @@ def create_app(test_config=None):
         return jsonify({'message': 'Character deleted successfully'}), 200
 
 
+    # Chat Routes
+
+    # Chat Routes - Updated for Selective Storage Integration
+    @app.route('/chat/send', methods=['POST'])
+    @token_required
+    def send_chat_message():
+        """Send a chat message - handles both regular WebSocket messages and important message storage"""
+        user_id = g.user_id
+        data = sanitize_input(request.json or {})
+    
+        required = ('channel_id', 'message', 'player_name', 'world_key')
+        if not all(k in data for k in required):
+            return jsonify({'error': 'Missing required fields'}), 400
+    
+        message_text = data['message'].strip()
+        channel_id = data['channel_id']
+        player_name = data['player_name']
+        world_key = data['world_key']
+        message_type = data.get('message_type', 'normal')
+        permanent_storage = data.get('permanent_storage', False)
+        storage_reason = data.get('storage_reason', '')
+    
+        if not message_text:
+            return jsonify({'error': 'Empty message not allowed'}), 400
+    
+        # Spam and content filtering for important messages
+        if permanent_storage:
+            # Enhanced spam detection for stored messages
+            spam_result = detect_spam_content(message_text, player_name, user_id)
+            if spam_result.get('is_spam'):
+                print(f"[API] 🚩 Spam detected in important message from {player_name}: {spam_result['reason']}")
+                return jsonify({
+                    'message': 'Message processed',
+                    'flagged': True,
+                    'blocked': spam_result.get('blocked', False),
+                    'reason': spam_result['reason']
+                }), 200
+        
+            # Profanity filtering for stored messages
+            profanity_result = detect_profanity(message_text)
+            if profanity_result.get('contains_profanity'):
+                print(f"[API] 🚩 Profanity detected in important message from {player_name}: {profanity_result['reason']}")
+                return jsonify({
+                    'message': 'Message processed',
+                    'flagged': True,
+                    'blocked': profanity_result.get('blocked', False),
+                    'reason': profanity_result['reason']
+                }), 200
+    
+        timestamp = int(time.time())
+    
+        try:
+            # Store the message in database (for important messages or API-direct sends)
+            db_execute(
+                '''INSERT INTO chat_messages 
+                   (user_id, player_name, channel_id, message, world_key, timestamp, message_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                (user_id, player_name, channel_id, message_text, world_key, timestamp, message_type),
+                commit=True
+            )
+        
+            log_message = f"Message stored: {storage_reason}" if storage_reason else "Message stored via API"
+            print(f"[API] ✅ {log_message} from {player_name}")
+        
+            return jsonify({
+                'message': 'Message sent successfully',
+                'timestamp': timestamp,
+                'stored': True,
+                'storage_reason': storage_reason if storage_reason else 'API direct send'
+            }), 200
+        
+        except Exception as e:
+            print(f"[API] ❌ Failed to store message from {player_name}: {e}")
+            return jsonify({'error': 'Failed to send message'}), 500
+
+    @app.route('/chat/tell', methods=['POST']) 
+    @token_required
+    def send_tell():
+        """Send a private message to another player"""
+        user_id = g.user_id
+        data = sanitize_input(request.json or {})
+    
+        required = ('target_player', 'message', 'player_name', 'world_key')
+        if not all(k in data for k in required):
+            return jsonify({'error': 'Missing required fields'}), 400
+    
+        message_text = data['message'].strip()
+        if not message_text:
+            return jsonify({'error': 'Empty message not allowed'}), 400
+    
+        # Enhanced spam/profanity checking for private messages
+        spam_result = detect_spam_content(message_text, data['player_name'], user_id)
+        if spam_result.get('is_spam') and spam_result.get('blocked'):
+            return jsonify({'error': 'Message blocked due to spam detection'}), 400
+    
+        profanity_result = detect_profanity(message_text)
+        if profanity_result.get('contains_profanity') and profanity_result.get('blocked'):
+            return jsonify({'error': 'Message blocked due to inappropriate content'}), 400
+    
+        timestamp = int(time.time())
+    
+        try:
+            # Private messages are always stored for moderation purposes
+            db_execute(
+                '''INSERT INTO chat_messages 
+                   (user_id, player_name, channel_id, message, world_key, timestamp, target_player, message_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
+                (user_id, data['player_name'], 'Private', message_text, data['world_key'], 
+                 timestamp, data['target_player'], 'private'),
+                commit=True
+            )
+        
+            print(f"[API] ✅ Private message stored from {data['player_name']} to {data['target_player']}")
+        
+            return jsonify({
+                'message': 'Private message sent successfully',
+                'timestamp': timestamp,
+                'stored': True,
+                'storage_reason': 'Private message (moderation)'
+            }), 200
+        
+        except Exception as e:
+            print(f"[API] ❌ Failed to send private message: {e}")
+            return jsonify({'error': 'Failed to send private message'}), 500
+
+    @app.route('/chat/history/<world_key>', methods=['GET'])
+    @token_required
+    def get_chat_history(world_key):
+        """Get chat history - returns only stored important messages"""
+        user_id = g.user_id
+        channel_id = request.args.get('channel_id', 'General_1')
+        limit = min(int(request.args.get('limit', 50)), 100)
+    
+        if not world_key:
+            return jsonify({'error': 'world_key is required'}), 400
+    
+        try:
+            # Only return stored important messages
+            messages = db_execute(
+                '''SELECT user_id, player_name, channel_id, message, timestamp, message_type, target_player
+                   FROM chat_messages 
+                   WHERE world_key = ? AND channel_id = ?
+                   ORDER BY timestamp DESC 
+                   LIMIT ?''',
+                (world_key, channel_id, limit),
+                fetchall=True
+            )
+        
+            formatted_messages = []
+            for msg in messages:
+                formatted_messages.append({
+                    'user_id': msg['user_id'],
+                    'player_name': msg['player_name'],
+                    'channel_id': msg['channel_id'],
+                    'message': msg['message'],
+                    'timestamp': msg['timestamp'],
+                    'message_type': msg['message_type'],
+                    'target_player': msg['target_player'],
+                    'formatted_time': datetime.fromtimestamp(msg['timestamp']).strftime('%Y-%m-%d %H:%M:%S')
+                })
+        
+            # Reverse to get chronological order
+            formatted_messages.reverse()
+        
+            print(f"[API] 📜 Returned {len(formatted_messages)} stored messages for {world_key}:{channel_id}")
+        
+            return jsonify({
+                'messages': formatted_messages,
+                'count': len(formatted_messages),
+                'channel_id': channel_id,
+                'world_key': world_key,
+                'note': 'These are stored important messages only. For recent chat, use WebSocket chat history.'
+            }), 200
+        
+        except Exception as e:
+            print(f"[API] ❌ Failed to get chat history: {e}")
+            return jsonify({'error': 'Failed to get chat history'}), 500
+
+    @app.route('/chat/channels', methods=['GET'])
+    @token_required
+    def get_chat_channels():
+        """Get available chat channels for a world"""
+        world_key = request.args.get('world_key')
+    
+        if not world_key:
+            return jsonify({'error': 'world_key is required'}), 400
+    
+        try:
+            # Get channels that have stored messages
+            channels = db_execute(
+                '''SELECT DISTINCT channel_id, COUNT(*) as message_count
+                   FROM chat_messages 
+                   WHERE world_key = ?
+                   GROUP BY channel_id
+                   ORDER BY message_count DESC''',
+                (world_key,),
+                fetchall=True
+            )
+        
+            # Add default channels
+            default_channels = [
+                {'channel_id': 'General_1', 'name': 'General', 'type': 'public'},
+                {'channel_id': 'Guild', 'name': 'Guild', 'type': 'guild'},
+                {'channel_id': 'Raid', 'name': 'Raid', 'type': 'raid'},
+                {'channel_id': 'Trade', 'name': 'Trade', 'type': 'public'},
+                {'channel_id': 'System', 'name': 'System', 'type': 'system'}
+            ]
+        
+            formatted_channels = []
+            for channel in default_channels:
+                stored_count = next((c['message_count'] for c in channels if c['channel_id'] == channel['channel_id']), 0)
+                formatted_channels.append({
+                    'channel_id': channel['channel_id'],
+                    'name': channel['name'],
+                    'type': channel['type'],
+                    'stored_message_count': stored_count
+                })
+        
+            return jsonify({
+                'channels': formatted_channels,
+                'world_key': world_key
+            }), 200
+        
+        except Exception as e:
+            print(f"[API] ❌ Failed to get chat channels: {e}")
+            return jsonify({'error': 'Failed to get chat channels'}), 500
+
+    @app.route('/chat/stats', methods=['GET'])
+    @token_required
+    def get_chat_stats():
+        """Get chat system statistics"""
+        world_key = request.args.get('world_key')
+    
+        try:
+            if world_key:
+                # World-specific stats
+                stats = db_execute(
+                    '''SELECT 
+                       COUNT(*) as total_stored,
+                       COUNT(DISTINCT channel_id) as active_channels,
+                       COUNT(DISTINCT user_id) as active_users,
+                       MIN(timestamp) as first_message,
+                       MAX(timestamp) as last_message
+                       FROM chat_messages 
+                       WHERE world_key = ?''',
+                    (world_key,),
+                    fetchone=True
+                )
+            
+                # Message type breakdown
+                message_types = db_execute(
+                    '''SELECT message_type, COUNT(*) as count
+                       FROM chat_messages 
+                       WHERE world_key = ?
+                       GROUP BY message_type
+                       ORDER BY count DESC''',
+                    (world_key,),
+                    fetchall=True
+                )
+            
+            else:
+                # Global stats
+                stats = db_execute(
+                    '''SELECT 
+                       COUNT(*) as total_stored,
+                       COUNT(DISTINCT channel_id) as active_channels,
+                       COUNT(DISTINCT user_id) as active_users,
+                       COUNT(DISTINCT world_key) as active_worlds,
+                       MIN(timestamp) as first_message,
+                       MAX(timestamp) as last_message
+                       FROM chat_messages''',
+                    fetchone=True
+                )
+            
+                # Message type breakdown
+                message_types = db_execute(
+                    '''SELECT message_type, COUNT(*) as count
+                       FROM chat_messages 
+                       GROUP BY message_type
+                       ORDER BY count DESC''',
+                    fetchall=True
+                )
+        
+            return jsonify({
+                'stats': {
+                    'total_stored_messages': stats['total_stored'],
+                    'active_channels': stats['active_channels'],
+                    'active_users': stats['active_users'],
+                    'active_worlds': stats.get('active_worlds', 1),
+                    'first_message_timestamp': stats['first_message'],
+                    'last_message_timestamp': stats['last_message'],
+                    'first_message_date': datetime.fromtimestamp(stats['first_message']).isoformat() if stats['first_message'] else None,
+                    'last_message_date': datetime.fromtimestamp(stats['last_message']).isoformat() if stats['last_message'] else None
+                },
+                'message_types': [{'type': mt['message_type'], 'count': mt['count']} for mt in message_types],
+                'world_key': world_key,
+                'note': 'These statistics reflect only stored important messages, not all chat activity.'
+            }), 200
+        
+        except Exception as e:
+            print(f"[API] ❌ Failed to get chat stats: {e}")
+            return jsonify({'error': 'Failed to get chat stats'}), 500
+
+    def detect_spam_content(message_text: str, player_name: str, user_id: str) -> dict:
+        """
+        Enhanced spam detection for important messages
+        Returns: {'is_spam': bool, 'blocked': bool, 'reason': str}
+        """
+        message_lower = message_text.lower()
+    
+        # Check for excessive repetition
+        if len(message_text) > 50:
+            # Check for repeated characters
+            for i in range(len(message_text) - 6):
+                if all(message_text[i] == message_text[i+j] for j in range(7)):
+                    return {'is_spam': True, 'blocked': True, 'reason': 'Excessive character repetition'}
+    
+        # Check for repeated words/phrases
+        words = message_text.split()
+        if len(words) > 5:
+            for i in range(len(words) - 3):
+                if words[i] == words[i+1] == words[i+2] == words[i+3]:
+                    return {'is_spam': True, 'blocked': True, 'reason': 'Excessive word repetition'}
+    
+        # Check for common spam patterns
+        spam_patterns = [
+            'visit our website',
+            'click here now',
+            'limited time offer',
+            'free gold',
+            'cheap gold',
+            'account for sale',
+            'power leveling service',
+            'buy now'
+        ]
+    
+        for pattern in spam_patterns:
+            if pattern in message_lower:
+                return {'is_spam': True, 'blocked': False, 'reason': f'Potential spam pattern: {pattern}'}
+    
+        # Check for excessive caps in important messages
+        if len(message_text) > 20 and message_text.isupper():
+            return {'is_spam': True, 'blocked': False, 'reason': 'Excessive capitalization'}
+    
+        # Check for URL spam
+        url_count = len(re.findall(r'http[s]?://|www\.|\.[a-z]{2,3}(?:\s|$)', message_lower))
+        if url_count > 2:
+            return {'is_spam': True, 'blocked': True, 'reason': 'Multiple URLs detected'}
+    
+        return {'is_spam': False, 'blocked': False, 'reason': ''}
+
+    def detect_profanity(message_text: str) -> dict:
+        """
+        Enhanced profanity detection for stored messages
+        Returns: {'contains_profanity': bool, 'blocked': bool, 'reason': str}
+        """
+        message_lower = message_text.lower()
+    
+        # Serious profanity that should be blocked
+        severe_profanity = [
+            'fuck', 'shit', 'bitch', 'asshole', 'damn', 'crap',
+            # Add more words as needed
+        ]
+    
+        # Hate speech that should be blocked immediately
+        hate_speech = [
+            'nigger', 'faggot', 'retard', 'nazi', 'hitler',
+            # Add more hate speech terms
+        ]
+    
+        # Check for hate speech (immediate block)
+        for word in hate_speech:
+            if word in message_lower:
+                return {'contains_profanity': True, 'blocked': True, 'reason': 'Hate speech detected'}
+    
+        # Check for severe profanity (flag but maybe don't block important messages)
+        for word in severe_profanity:
+            if word in message_lower:
+                return {'contains_profanity': True, 'blocked': False, 'reason': f'Profanity detected: {word}'}
+    
+        # Check for masked profanity (f*ck, sh!t, etc.)
+        masked_patterns = [
+            r'f\*+c?k+',
+            r's\*+h?i+t+',
+            r'b\*+i?t+c+h+',
+            r'd\*+a?m+n+',
+            r'a\*+s+s+',
+            r'c\*+r?a+p+'
+        ]
+    
+        for pattern in masked_patterns:
+            if re.search(pattern, message_lower):
+                return {'contains_profanity': True, 'blocked': False, 'reason': 'Masked profanity detected'}
+    
+        return {'contains_profanity': False, 'blocked': False, 'reason': ''}
+
+
+    # GUILD SYSTEM ROUTES
+    @app.route('/social/guilds', methods=['GET'])
+    @token_required
+    def get_user_guilds():
+        """Get guilds the user belongs to"""
+        user_id = g.user_id
+    
+        guilds = db_execute(
+            '''SELECT g.guild_id, g.guild_name, gm.rank_name, gm.joined_date
+               FROM guilds g
+               JOIN guild_members gm ON g.guild_id = gm.guild_id
+               WHERE gm.user_id = ?''',
+            (user_id,),
+            fetchall=True
+        )
+    
+        return jsonify({'guilds': [dict(guild) for guild in guilds or []]}), 200
+
+    @app.route('/social/guilds/create', methods=['POST'])
+    @token_required  
+    def create_guild():
+        """Create a new guild"""
+        user_id = g.user_id
+        data = sanitize_input(request.json or {})
+    
+        if 'guild_name' not in data:
+            return jsonify({'error': 'guild_name required'}), 400
+    
+        guild_id = str(uuid.uuid4())
+        timestamp = int(time.time())
+    
+        # Create guild
+        db_execute(
+            '''INSERT INTO guilds (guild_id, guild_name, leader_id, created_at)
+               VALUES (?, ?, ?, ?)''',
+            (guild_id, data['guild_name'], user_id, timestamp),
+            commit=True
+        )
+    
+        # Add leader as member
+        db_execute(
+            '''INSERT INTO guild_members (guild_id, user_id, rank_name, joined_date)
+               VALUES (?, ?, ?, ?)''',
+            (guild_id, user_id, 'Leader', timestamp),
+            commit=True
+        )
+    
+        return jsonify({'guild_id': guild_id, 'message': 'Guild created successfully'}), 201
+
+    # GROUP SYSTEM ROUTES  
+    @app.route('/social/groups/create', methods=['POST'])
+    @token_required
+    def create_group():
+        """Create a new group"""
+        user_id = g.user_id
+    
+        group_id = str(uuid.uuid4())
+        timestamp = int(time.time())
+    
+        db_execute(
+            '''INSERT INTO groups (group_id, leader_id, created_at)
+               VALUES (?, ?, ?)''',
+            (group_id, user_id, timestamp),
+            commit=True
+        )
+    
+        db_execute(
+            '''INSERT INTO group_members (group_id, user_id, joined_date)
+               VALUES (?, ?, ?)''',
+            (group_id, user_id, timestamp),
+            commit=True
+        )
+    
+        return jsonify({'group_id': group_id}), 201
+
+    # RAID SYSTEM ROUTES
+    @app.route('/social/raids/create', methods=['POST'])
+    @token_required
+    def create_raid():
+        """Create a new raid"""
+        user_id = g.user_id
+    
+        raid_id = str(uuid.uuid4())
+        timestamp = int(time.time())
+    
+        db_execute(
+            '''INSERT INTO raids (raid_id, leader_id, created_at)
+               VALUES (?, ?, ?)''',
+            (raid_id, user_id, timestamp),
+            commit=True
+        )
+    
+        db_execute(
+            '''INSERT INTO raid_members (raid_id, user_id, joined_date)
+               VALUES (?, ?, ?)''',
+            (raid_id, user_id, timestamp),
+            commit=True
+        )
+    
+        return jsonify({'raid_id': raid_id}), 201
+
+
+
+    # Join World Route
+
     @app.route('/join_world', methods=['POST'])
     @token_required
     def join_world():
@@ -2309,6 +2848,10 @@ def create_app(test_config=None):
             return "stats", "stats_json"
         elif save_key == "StatSystemSavedKeys":
             return "character_data", "saved_keys"
+        elif save_key == "InventorySystemSavedKeys":
+            return "character_data", "inventory_keys"
+        elif save_key == "QuestSystemSavedKeys":
+            return "character_data", "quest_keys"
         elif save_key.endswith(".ActiveQuests"):
             return "quests", "active_quests"
         elif save_key.endswith(".CompletedQuests"):
@@ -2327,6 +2870,7 @@ def create_app(test_config=None):
 
 
 
+    @limiter.exempt
     @app.route("/data/<world_key>/<path:save_key>", methods=["GET", "POST"])
     def handle_data(world_key, save_key):
         user_id = get_current_user_id()

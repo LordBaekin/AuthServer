@@ -7,3 +7,5 @@ PyJWT==2.8.0
 redis==5.0.1  # For token blacklisting and rate limiting
 gunicorn==21.2.0  # For production deployment
 pymysql==1.1.0   # Pure Python MySQL client without protobuf dependency
+
+flask-socketio==5.3.6

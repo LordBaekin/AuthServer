@@ -51,6 +51,7 @@
     <Compile Include="tk_update_manager.py" />
     <Compile Include="tk_theme_manager.py" />
     <Compile Include="token_debugger.py" />
+    <Compile Include="websocket_chat_server.py" />
   </ItemGroup>
   <ItemGroup>
     <Folder Include="gui\" />

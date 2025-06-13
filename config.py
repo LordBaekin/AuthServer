@@ -35,6 +35,12 @@ DEFAULT_CONFIG = {
     "WORKERS": 1,  # Number of worker processes for production server
     "SERVER_TYPE": "development",  # Options: development, production
     
+    # SSL/HTTPS settings
+    "SSL_ENABLED": False,
+    "SSL_CERT_PATH": "",
+    "SSL_KEY_PATH": "",
+    "SSL_CA_CERT_PATH": "",
+    
     # SMTP settings
     "SMTP_HOST": "smtp.ionos.com",
     "SMTP_PORT": 587,
@@ -57,7 +63,7 @@ DEFAULT_CONFIG = {
     "JWT_AUDIENCE": "coherence-cloud",    # Audience claim for JWT tokens
     "JWT_EXPIRATION": 86400,  # 24 hours
     "REFRESH_TOKEN_EXPIRATION": 2592000,  # 30 days
-    "ALLOWED_ORIGINS": "http://localhost:3000,https://vespeyr.com",
+    "ALLOWED_ORIGINS": "http://localhost:3000,https://vespeyr.com,https://api.vespeyr.com",
     "PASSWORD_MIN_LENGTH": 8,
     "PASSWORD_REQUIRE_MIXED_CASE": True,
     "PASSWORD_REQUIRE_DIGIT": True,

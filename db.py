@@ -193,6 +193,133 @@ CREATE TABLE IF NOT EXISTS character_data (
   PRIMARY KEY (world_key, character_id)
 );
 
+-- CHAT SYSTEM TABLES
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  player_name TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  message TEXT NOT NULL,
+  world_key TEXT NOT NULL,
+  timestamp INTEGER NOT NULL,
+  target_player TEXT DEFAULT NULL,
+  message_type TEXT DEFAULT 'normal',
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS chat_channels (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_id TEXT UNIQUE NOT NULL,
+  channel_name TEXT NOT NULL,
+  channel_type TEXT NOT NULL,
+  world_key TEXT,
+  created_at INTEGER,
+  is_active INTEGER DEFAULT 1
+);
+
+-- GUILD SYSTEM TABLES
+CREATE TABLE IF NOT EXISTS guilds (
+  guild_id TEXT PRIMARY KEY,
+  guild_name TEXT NOT NULL,
+  leader_id TEXT NOT NULL,
+  created_at INTEGER,
+  guild_level INTEGER DEFAULT 1,
+  guild_xp INTEGER DEFAULT 0,
+  FOREIGN KEY (leader_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS guild_members (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  rank_name TEXT DEFAULT 'Member',
+  joined_date INTEGER,
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id),
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  UNIQUE(guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS guild_bank (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  item_data TEXT,
+  deposited_by TEXT,
+  deposited_at INTEGER,
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id),
+  FOREIGN KEY (deposited_by) REFERENCES users(id)
+);
+
+-- GROUP SYSTEM TABLES
+CREATE TABLE IF NOT EXISTS groups (
+  group_id TEXT PRIMARY KEY,
+  leader_id TEXT NOT NULL,
+  created_at INTEGER,
+  max_members INTEGER DEFAULT 5,
+  FOREIGN KEY (leader_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS group_members (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  joined_date INTEGER,
+  FOREIGN KEY (group_id) REFERENCES groups(group_id),
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  UNIQUE(group_id, user_id)
+);
+
+-- RAID SYSTEM TABLES  
+CREATE TABLE IF NOT EXISTS raids (
+  raid_id TEXT PRIMARY KEY,
+  leader_id TEXT NOT NULL,
+  created_at INTEGER,
+  max_members INTEGER DEFAULT 40,
+  FOREIGN KEY (leader_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS raid_members (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  raid_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  subgroup_id TEXT DEFAULT NULL,
+  joined_date INTEGER,
+  FOREIGN KEY (raid_id) REFERENCES raids(raid_id),
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  UNIQUE(raid_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS raid_lockouts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  boss_id TEXT NOT NULL,
+  locked_until INTEGER NOT NULL,
+  world_key TEXT,
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  UNIQUE(user_id, boss_id, world_key)
+);
+
+-- FRIENDS SYSTEM TABLE
+CREATE TABLE IF NOT EXISTS friends (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  friend_user_id TEXT NOT NULL,
+  status TEXT DEFAULT 'pending',
+  created_at INTEGER,
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  FOREIGN KEY (friend_user_id) REFERENCES users(id),
+  UNIQUE(user_id, friend_user_id)
+);
+
+-- Chat system indexes
+CREATE INDEX IF NOT EXISTS idx_chat_messages_world_channel ON chat_messages (world_key, channel_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_target ON chat_messages (target_player, timestamp);
+
+-- Social system indexes
+CREATE INDEX IF NOT EXISTS idx_guild_members_user ON guild_members (user_id);
+CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members (user_id);
+CREATE INDEX IF NOT EXISTS idx_raid_members_user ON raid_members (user_id);
+CREATE INDEX IF NOT EXISTS idx_friends_user ON friends (user_id);
+CREATE INDEX IF NOT EXISTS idx_raid_lockouts_user_boss ON raid_lockouts (user_id, boss_id);
 
 -- Create indexes for faster lookups
 CREATE INDEX IF NOT EXISTS idx_user_sessions_user_id ON user_sessions (user_id);
@@ -367,10 +494,134 @@ CREATE TABLE IF NOT EXISTS character_data (
   PRIMARY KEY (world_key, character_id)
 );
 
+-- CHAT SYSTEM TABLES
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  player_name TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  message TEXT NOT NULL,
+  world_key TEXT NOT NULL,
+  timestamp INTEGER NOT NULL,
+  target_player TEXT DEFAULT NULL,
+  message_type TEXT DEFAULT 'normal',
+  FOREIGN KEY (user_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS chat_channels (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  channel_id TEXT UNIQUE NOT NULL,
+  channel_name TEXT NOT NULL,
+  channel_type TEXT NOT NULL,
+  world_key TEXT,
+  created_at INTEGER,
+  is_active INTEGER DEFAULT 1
+);
+
+-- GUILD SYSTEM TABLES
+CREATE TABLE IF NOT EXISTS guilds (
+  guild_id TEXT PRIMARY KEY,
+  guild_name TEXT NOT NULL,
+  leader_id TEXT NOT NULL,
+  created_at INTEGER,
+  guild_level INTEGER DEFAULT 1,
+  guild_xp INTEGER DEFAULT 0,
+  FOREIGN KEY (leader_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS guild_members (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  rank_name TEXT DEFAULT 'Member',
+  joined_date INTEGER,
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id),
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  UNIQUE(guild_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS guild_bank (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id TEXT NOT NULL,
+  item_data TEXT,
+  deposited_by TEXT,
+  deposited_at INTEGER,
+  FOREIGN KEY (guild_id) REFERENCES guilds(guild_id),
+  FOREIGN KEY (deposited_by) REFERENCES users(id)
+);
+
+-- GROUP SYSTEM TABLES
+CREATE TABLE IF NOT EXISTS groups (
+  group_id TEXT PRIMARY KEY,
+  leader_id TEXT NOT NULL,
+  created_at INTEGER,
+  max_members INTEGER DEFAULT 5,
+  FOREIGN KEY (leader_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS group_members (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  group_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  joined_date INTEGER,
+  FOREIGN KEY (group_id) REFERENCES groups(group_id),
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  UNIQUE(group_id, user_id)
+);
+
+-- RAID SYSTEM TABLES  
+CREATE TABLE IF NOT EXISTS raids (
+  raid_id TEXT PRIMARY KEY,
+  leader_id TEXT NOT NULL,
+  created_at INTEGER,
+  max_members INTEGER DEFAULT 40,
+  FOREIGN KEY (leader_id) REFERENCES users(id)
+);
+
+CREATE TABLE IF NOT EXISTS raid_members (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  raid_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  subgroup_id TEXT DEFAULT NULL,
+  joined_date INTEGER,
+  FOREIGN KEY (raid_id) REFERENCES raids(raid_id),
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  UNIQUE(raid_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS raid_lockouts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  boss_id TEXT NOT NULL,
+  locked_until INTEGER NOT NULL,
+  world_key TEXT,
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  UNIQUE(user_id, boss_id, world_key)
+);
+
+-- FRIENDS SYSTEM TABLE
+CREATE TABLE IF NOT EXISTS friends (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  friend_user_id TEXT NOT NULL,
+  status TEXT DEFAULT 'pending',
+  created_at INTEGER,
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  FOREIGN KEY (friend_user_id) REFERENCES users(id),
+  UNIQUE(user_id, friend_user_id)
+);
 
 
+-- Chat system indexes
+CREATE INDEX IF NOT EXISTS idx_chat_messages_world_channel ON chat_messages (world_key, channel_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_target ON chat_messages (target_player, timestamp);
 
-
+-- Social system indexes
+CREATE INDEX IF NOT EXISTS idx_guild_members_user ON guild_members (user_id);
+CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members (user_id);
+CREATE INDEX IF NOT EXISTS idx_raid_members_user ON raid_members (user_id);
+CREATE INDEX IF NOT EXISTS idx_friends_user ON friends (user_id);
+CREATE INDEX IF NOT EXISTS idx_raid_lockouts_user_boss ON raid_lockouts (user_id, boss_id);
 
 
 -- Create indexes for faster lookups

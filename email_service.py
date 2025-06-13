@@ -191,25 +191,26 @@ def send_email(to_email: str, subject: str, body: str, is_html: bool = False) ->
     port = config["SMTP_PORT"]
     user = config["SMTP_USER"]
     pwd  = config["SMTP_PASS"]
-
     logger.debug("SMTP: connecting to %s:%s", host, port)
     try:
         smtp = smtplib.SMTP(host, port, timeout=10)
-
         # Capture low-level protocol logs into our logger
         smtp.set_debuglevel(1)
-        def _debug_printer(*args):
-            line = " ".join(str(a) for a in args)
+        
+        # FIXED: Proper function definition and signature
+        def _debug_printer(msg, *args):
+            if args:
+                line = f"{msg} {' '.join(str(a) for a in args)}"
+            else:
+                line = str(msg)
             logger.debug("SMTP-RAW: %s", line.strip())
-
-
+        
         smtp._print_debug = _debug_printer
-
         logger.debug("SMTP: starting TLS")
         smtp.starttls()
         logger.debug("SMTP: logging in as %s", user)
         smtp.login(user, pwd)
-
+        
         # Build the message
         msg = EmailMessage()
         msg["From"]    = config.get("SMTP_FROM_ADDRESS", user)
@@ -218,14 +219,13 @@ def send_email(to_email: str, subject: str, body: str, is_html: bool = False) ->
         if is_html:
             msg.add_header("Content-Type", "text/html")
         msg.set_content(body, subtype=("html" if is_html else "plain"))
-
+        
         logger.debug("SMTP: sending message to %s", to_email)
         smtp.send_message(msg)
         smtp.quit()
-
         logger.info("SMTP: email successfully sent to %s", to_email)
         return True
-
+        
     except Exception as e:
         # This will log the full stack trace
         logger.exception("SMTP: failed to send email to %s", to_email)
